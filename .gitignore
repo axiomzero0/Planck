@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.o
+*.s.tmp
+
+# Compiled Planck outputs produced by tests
+/tests/out/
+/crates/planckc/tests/out/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store

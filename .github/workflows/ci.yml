@@ -1,0 +1,35 @@
+# CI gates for the Planck repository.
+# Every job must pass for a change to merge; the lint and self-test gates
+# enforce the CEP&CC standard mechanically.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Tests
+        run: cargo test --workspace
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: CEP lint (severity 0 and 1 block)
+        run: cargo run -p cep_lint -- .
+      - name: CEP lint self-test
+        run: cargo run -p cep_lint -- --self-test
+      - name: Determinism
+        run: |
+          printf 'fn main() -> i32 { print("ci"); return 0; }' > /tmp/d1.plk
+          cp /tmp/d1.plk /tmp/d2.plk
+          ./target/debug/planckc build /tmp/d1.plk -o /tmp/d1
+          ./target/debug/planckc build /tmp/d2.plk -o /tmp/d2
+          cmp /tmp/d1 /tmp/d2

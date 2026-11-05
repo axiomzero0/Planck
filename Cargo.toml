@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/planck_support",
+    "crates/planck_lexer",
+    "crates/planck_parser",
+    "crates/planck_sema",
+    "crates/planck_ir",
+    "crates/planck_opt",
+    "crates/planck_codegen",
+    "crates/planckc",
+    "tools/cep_lint",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+planck_support = { path = "crates/planck_support" }
+planck_lexer = { path = "crates/planck_lexer" }
+planck_parser = { path = "crates/planck_parser" }
+planck_sema = { path = "crates/planck_sema" }
+planck_ir = { path = "crates/planck_ir" }
+planck_opt = { path = "crates/planck_opt" }
+planck_codegen = { path = "crates/planck_codegen" }
+
+[profile.release]
+panic = "abort"
