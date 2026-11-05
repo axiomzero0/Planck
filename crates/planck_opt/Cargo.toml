@@ -1,0 +1,15 @@
+[package]
+name = "planck_opt"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Verified optimization pass pipeline over the Planck IR."
+
+[dependencies]
+planck_support = { workspace = true }
+planck_ir = { workspace = true }
+
+[dev-dependencies]
+planck_lexer = { workspace = true }
+planck_parser = { workspace = true }
+planck_sema = { workspace = true }
