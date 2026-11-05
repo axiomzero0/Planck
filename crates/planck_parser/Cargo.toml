@@ -1,0 +1,10 @@
+[package]
+name = "planck_parser"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Recursive-descent parser and AST for the Planck language."
+
+[dependencies]
+planck_support = { workspace = true }
+planck_lexer = { workspace = true }
