@@ -1,0 +1,19 @@
+[package]
+name = "planckc"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "The Planck compiler driver: build, run, IR dump, and assembly emission."
+
+[[bin]]
+name = "planckc"
+path = "src/main.rs"
+
+[dependencies]
+planck_support = { workspace = true }
+planck_lexer = { workspace = true }
+planck_parser = { workspace = true }
+planck_sema = { workspace = true }
+planck_ir = { workspace = true }
+planck_opt = { workspace = true }
+planck_codegen = { workspace = true }

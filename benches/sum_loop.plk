@@ -1,0 +1,11 @@
+// Benchmark: sums one million integers through a range loop.
+// Exercises the interpreter-free native path: loop, checked arithmetic, memory traffic.
+fn main() -> i32 {
+    let mut total: i64 = 0;
+    for i in 0..1000000 {
+        total = total + i as i64;
+    }
+    print(total);
+    print('\n');
+    return 0;
+}
