@@ -1,0 +1,363 @@
+{
+  "standard": {
+    "name": "CEP&CC",
+    "version": "0.4",
+    "document": "standard.md"
+  },
+  "tool": {
+    "name": "cep_lint",
+    "version": "0.1.0"
+  },
+  "file_globs": [
+    "crates/**/*.rs",
+    "tools/cep_lint/src/**/*.rs",
+    "tools/cep_lint/tests/*.rs",
+    "tools/cep_lint/tests/fixtures/compliant.rs"
+  ],
+  "fail_on": [
+    0,
+    1
+  ],
+  "rules": {
+    "CEP-LINT-FILE-HEADER": {
+      "check": "comment_block_schema",
+      "mode": "file_header",
+      "severity": 1,
+      "sections": [
+        "35",
+        "10.2"
+      ],
+      "params": {
+        "max_start_line": 5,
+        "required_fields": [
+          "CEP:FILE",
+          "CEP:WHAT",
+          "CEP:WHY",
+          "CEP:CLASS",
+          "CEP:STATUS",
+          "CEP:FAILURE",
+          "CEP:ASSUMES",
+          "CEP:COST",
+          "CEP:EVIDENCE"
+        ],
+        "class_field": "CEP:CLASS",
+        "allowed_classes": [
+          "CEP-0",
+          "CEP-1",
+          "CEP-2",
+          "CC",
+          "FFI",
+          "HPC-0",
+          "HPC-1",
+          "HPC-2",
+          "RCS-0",
+          "RCS-1",
+          "RCS-2"
+        ]
+      },
+      "message": "file is missing or violates the CEP header block"
+    },
+    "CEP-LINT-FUNC-BLOCK": {
+      "check": "function_policy",
+      "mode": "block",
+      "severity": 1,
+      "sections": [
+        "10.2",
+        "10.3-10.9"
+      ],
+      "params": {
+        "required_fields": [
+          "CEP:WHAT",
+          "CEP:WHY",
+          "CEP:STATUS",
+          "CEP:FAILURE",
+          "CEP:ASSUMES",
+          "CEP:COST",
+          "CEP:EVIDENCE"
+        ],
+        "min_body_statements": 2
+      },
+      "message": "function lacks a complete CEP comment block"
+    },
+    "CEP-LINT-STATUS-VALUE": {
+      "check": "comment_block_schema",
+      "mode": "status_value",
+      "severity": 2,
+      "sections": [
+        "10.5"
+      ],
+      "params": {
+        "allowed_values": [
+          "complete",
+          "partial",
+          "stub",
+          "placeholder"
+        ]
+      },
+      "message": "CEP:STATUS value is not one of complete|partial|stub|placeholder"
+    },
+    "CEP-LINT-TODO-OWNER": {
+      "check": "comment_regex",
+      "mode": "line",
+      "severity": 1,
+      "sections": [
+        "10.10"
+      ],
+      "params": {
+        "pattern": "(TODO|FIXME|XXX|HACK)",
+        "icase": true,
+        "suppression_pattern": "CEP:TODO\\([a-zA-Z0-9_-]+\\): CEP-[0-9]+:"
+      },
+      "message": "anonymous work marker in a comment; use CEP:TODO(owner): CEP-<ticket>: text"
+    },
+    "CEP-LINT-STUB-DECL": {
+      "check": "comment_block_schema",
+      "mode": "stub_requirements",
+      "severity": 1,
+      "sections": [
+        "10.5",
+        "10.10"
+      ],
+      "params": {
+        "statuses": [
+          "stub",
+          "partial",
+          "placeholder"
+        ],
+        "required_fields": [
+          "CEP:OWNER",
+          "CEP:TICKET"
+        ]
+      },
+      "message": "stub, partial, or placeholder declaration without OWNER and TICKET"
+    },
+    "CEP-LINT-PLACEHOLDER-COMMENT": {
+      "check": "comment_regex",
+      "mode": "line",
+      "severity": 1,
+      "sections": [
+        "3",
+        "10.5"
+      ],
+      "params": {
+        "pattern": "(not implemented|unimplemented|placeholder|fixme|tbd|wip)",
+        "icase": true,
+        "suppression_pattern": "CEP:[A-Z-]+:"
+      },
+      "message": "placeholder marker text in a comment; declare it with a CEP:STATUS field instead"
+    },
+    "CEP-LINT-PLACEHOLDER-TEXT": {
+      "check": "string_literal_regex",
+      "mode": "literal",
+      "severity": 1,
+      "sections": [
+        "3",
+        "10.5"
+      ],
+      "params": {
+        "pattern": "(not implemented|unimplemented|placeholder|todo|fixme|tbd|wip)"
+      },
+      "message": "placeholder marker text in a string literal; placeholders must fail loudly, not leak into runtime messages"
+    },
+    "CEP-LINT-MAGIC-NUMBER": {
+      "check": "numeric_literal_policy",
+      "mode": "statement",
+      "severity": 2,
+      "sections": [
+        "Law 7",
+        "11.1-11.3",
+        "33.15"
+      ],
+      "params": {
+        "allowed_values": [
+          0,
+          1
+        ],
+        "exempt_contexts": [
+          "const ",
+          "static ",
+          "enum ",
+          "assert",
+          "#[",
+          "match ",
+          "0x",
+          "test",
+          "fn main"
+        ]
+      },
+      "message": "numeric literal outside a sanctioned context"
+    },
+    "CEP-LINT-MACRO-PREFIX": {
+      "check": "macro_prefix_policy",
+      "mode": "definition",
+      "severity": 2,
+      "sections": [
+        "33.16",
+        "8.4"
+      ],
+      "params": {
+        "name_pattern": "^CEP_[A-Z0-9_]*$",
+        "guard_pattern": "^_[A-Z0-9_]*$"
+      },
+      "message": "macro definition does not use the CEP_ prefix or guard pattern"
+    },
+    "CEP-LINT-HOT-BANNED": {
+      "check": "banned_token_policy",
+      "mode": "class_scoped",
+      "severity": 0,
+      "sections": [
+        "5.1",
+        "8.25-8.29",
+        "9.2-9.41",
+        "40.3",
+        "25.3.1"
+      ],
+      "params": {
+        "applies_to_classes": [
+          "CEP-0",
+          "HPC-0",
+          "RCS-0"
+        ],
+        "class_field": "CEP:CLASS",
+        "tokens": [
+          "Box::new",
+          "Vec::new",
+          "Vec::push",
+          "String::new",
+          "String::push_str",
+          "format!",
+          "println!",
+          "eprintln!",
+          "panic!",
+          "todo!",
+          "unimplemented!",
+          "unreachable!",
+          ".unwrap(",
+          ".expect(",
+          "Rc<",
+          "Arc<",
+          "Mutex",
+          "RwLock",
+          "dyn ",
+          "std::thread",
+          "std::io",
+          "std::fs",
+          "std::net",
+          "std::env",
+          "std::time"
+        ]
+      },
+      "message": "banned token in a CEP-0/HPC-0/RCS-0 classified file"
+    },
+    "CEP-LINT-STUB-BODY": {
+      "check": "function_policy",
+      "mode": "stub_body",
+      "severity": 1,
+      "sections": [
+        "10.5",
+        "19",
+        "20"
+      ],
+      "params": {
+        "suppress_statuses": [
+          "stub",
+          "partial",
+          "placeholder"
+        ]
+      },
+      "message": "empty function body without a declared stub status"
+    },
+    "CEP-LINT-EMPTY-CATCH": {
+      "check": "flat_code_regex",
+      "mode": "line",
+      "severity": 1,
+      "sections": [
+        "Law 6",
+        "12.2"
+      ],
+      "params": {
+        "pattern": "catch [(][^)]*[)] [{] [}]"
+      },
+      "message": "empty catch handler"
+    },
+    "CEP-LINT-EMPTY-BRANCH": {
+      "check": "flat_code_regex",
+      "mode": "line",
+      "severity": 2,
+      "sections": [
+        "14.5"
+      ],
+      "params": {
+        "pattern": "(if|while|for|match) .* [{] [}]"
+      },
+      "message": "branch guards an empty block"
+    },
+    "CEP-LINT-CONSTANT-RETURN": {
+      "check": "function_policy",
+      "mode": "constant_return",
+      "severity": 2,
+      "sections": [
+        "14.5"
+      ],
+      "params": {
+        "pattern": "return (true|false|nullptr);"
+      },
+      "message": "function body is a single constant return"
+    },
+    "CEP-LINT-NAMING-TYPE": {
+      "check": "flat_code_regex",
+      "mode": "names",
+      "severity": 2,
+      "sections": [
+        "33.11"
+      ],
+      "params": {
+        "pattern": "(struct|enum) [a-z]",
+        "line_group": "1"
+      },
+      "message": "type name is not PascalCase"
+    },
+    "CEP-LINT-NAMING-FUNC": {
+      "check": "function_policy",
+      "mode": "naming",
+      "severity": 2,
+      "sections": [
+        "33.13",
+        "33.20"
+      ],
+      "params": {
+        "name_pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "message": "function name is not snake_case"
+    },
+    "CEP-LINT-DOC-SYNC": {
+      "check": "doc_rule_coverage",
+      "mode": "document",
+      "severity": 1,
+      "sections": [
+        "Law 8",
+        "16",
+        "34.3"
+      ],
+      "params": {
+        "doc_path": "standard.md",
+        "heading_pattern": "### Rule ",
+        "version_pattern": "Version:"
+      },
+      "message": "lint configuration and the standard document disagree"
+    },
+    "CEP-LINT-COMMENTED-CODE": {
+      "check": "comment_regex",
+      "mode": "line",
+      "severity": 2,
+      "sections": [
+        "10.14"
+      ],
+      "params": {
+        "pattern": "^(let |fn |if |for |while |return |print|match |impl |struct |enum )[a-zA-Z_].*[;{}]$",
+        "suppression_pattern": "CEP:[A-Z-]+:"
+      },
+      "message": "commented-out code; use version control"
+    }
+  }
+}

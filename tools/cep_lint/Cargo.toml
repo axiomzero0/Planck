@@ -1,0 +1,12 @@
+[package]
+name = "cep_lint"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "CEP&CC mechanical enforcement tool (standard chapter 50), data-driven over .cep/cep_lint.json."
+
+[[bin]]
+name = "cep_lint"
+path = "src/main.rs"
+
+[dependencies]

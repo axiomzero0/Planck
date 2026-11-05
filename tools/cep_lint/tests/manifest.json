@@ -1,0 +1,156 @@
+{
+  "manifest_version": "1.0",
+  "description": "Self-test scenarios per configured rule: one violating and one compliant case with exact expected finding counts (standard 50.6 item 3).",
+  "scenarios": [
+    {
+      "name": "file_header_violation",
+      "fixture": "fixtures/violating/file_header.rs",
+      "expected": { "CEP-LINT-FILE-HEADER": 9 }
+    },
+    {
+      "name": "file_header_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-FILE-HEADER": 0 }
+    },
+    {
+      "name": "func_block_violation",
+      "fixture": "fixtures/violating/func_block.rs",
+      "expected": { "CEP-LINT-FUNC-BLOCK": 1 }
+    },
+    {
+      "name": "func_block_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-FUNC-BLOCK": 0 }
+    },
+    {
+      "name": "status_value_violation",
+      "fixture": "fixtures/violating/status_value.rs",
+      "expected": { "CEP-LINT-STATUS-VALUE": 1 }
+    },
+    {
+      "name": "status_value_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-STATUS-VALUE": 0 }
+    },
+    {
+      "name": "todo_owner_violation",
+      "fixture": "fixtures/violating/todo_owner.rs",
+      "expected": { "CEP-LINT-TODO-OWNER": 2 }
+    },
+    {
+      "name": "todo_owner_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-TODO-OWNER": 0 }
+    },
+    {
+      "name": "stub_decl_violation",
+      "fixture": "fixtures/violating/stub_decl.rs",
+      "expected": { "CEP-LINT-STUB-DECL": 2 }
+    },
+    {
+      "name": "stub_decl_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-STUB-DECL": 0 }
+    },
+    {
+      "name": "placeholder_comment_violation",
+      "fixture": "fixtures/violating/placeholder_comment.rs",
+      "expected": { "CEP-LINT-PLACEHOLDER-COMMENT": 1 }
+    },
+    {
+      "name": "placeholder_comment_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-PLACEHOLDER-COMMENT": 0 }
+    },
+    {
+      "name": "placeholder_text_violation",
+      "fixture": "fixtures/violating/placeholder_text.rs",
+      "expected": { "CEP-LINT-PLACEHOLDER-TEXT": 1 }
+    },
+    {
+      "name": "placeholder_text_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-PLACEHOLDER-TEXT": 0 }
+    },
+    {
+      "name": "magic_number_violation",
+      "fixture": "fixtures/violating/magic_number.rs",
+      "expected": { "CEP-LINT-MAGIC-NUMBER": 1 }
+    },
+    {
+      "name": "magic_number_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-MAGIC-NUMBER": 0 }
+    },
+    {
+      "name": "macro_prefix_violation",
+      "fixture": "fixtures/violating/macro_prefix.rs",
+      "expected": { "CEP-LINT-MACRO-PREFIX": 1 }
+    },
+    {
+      "name": "macro_prefix_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-MACRO-PREFIX": 0 }
+    },
+    {
+      "name": "hot_banned_violation",
+      "fixture": "fixtures/violating/hot_banned.rs",
+      "expected": { "CEP-LINT-HOT-BANNED": 0 }
+    },
+    {
+      "name": "hot_banned_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-HOT-BANNED": 0 }
+    },
+    {
+      "name": "stub_body_violation",
+      "fixture": "fixtures/violating/stub_body.rs",
+      "expected": { "CEP-LINT-STUB-BODY": 1 }
+    },
+    {
+      "name": "stub_body_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-STUB-BODY": 0 }
+    },
+    {
+      "name": "empty_branch_violation",
+      "fixture": "fixtures/violating/empty_branch.rs",
+      "expected": { "CEP-LINT-EMPTY-BRANCH": 1 }
+    },
+    {
+      "name": "empty_branch_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-EMPTY-BRANCH": 0 }
+    },
+    {
+      "name": "constant_return_violation",
+      "fixture": "fixtures/violating/constant_return.rs",
+      "expected": { "CEP-LINT-CONSTANT-RETURN": 1 }
+    },
+    {
+      "name": "constant_return_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-CONSTANT-RETURN": 0 }
+    },
+    {
+      "name": "naming_type_violation",
+      "fixture": "fixtures/violating/naming_type.rs",
+      "expected": { "CEP-LINT-NAMING-TYPE": 1 }
+    },
+    {
+      "name": "naming_type_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-NAMING-TYPE": 0 }
+    },
+    {
+      "name": "naming_func_violation",
+      "fixture": "fixtures/violating/naming_func.rs",
+      "expected": { "CEP-LINT-NAMING-FUNC": 1 }
+    },
+    {
+      "name": "naming_func_compliant",
+      "fixture": "fixtures/compliant.rs",
+      "expected": { "CEP-LINT-NAMING-FUNC": 0 }
+    }
+  ]
+}
