@@ -1,0 +1,12 @@
+[package]
+name = "planck_sema"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Semantic analysis for Planck: name resolution, type checking, mutability, move and borrow checking."
+
+[dependencies]
+planck_support = { workspace = true }
+planck_lexer = { workspace = true }
+planck_parser = { workspace = true }
+planck_ir = { workspace = true }
