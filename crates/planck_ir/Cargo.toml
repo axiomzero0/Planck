@@ -1,0 +1,9 @@
+[package]
+name = "planck_ir"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Planck intermediate representation: control flow graph with typed instructions, deterministic printer, verifier."
+
+[dependencies]
+planck_support = { workspace = true }
