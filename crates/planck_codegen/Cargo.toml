@@ -1,0 +1,10 @@
+[package]
+name = "planck_codegen"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "x86-64 System V code generation for Planck: instruction selection and AT&T assembly emission."
+
+[dependencies]
+planck_support = { workspace = true }
+planck_ir = { workspace = true }
