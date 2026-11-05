@@ -1,0 +1,8 @@
+[package]
+name = "planck_support"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Shared support types for the Planck compiler: spans, source maps, diagnostics."
+
+[dependencies]
