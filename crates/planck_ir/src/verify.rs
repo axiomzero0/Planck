@@ -289,7 +289,9 @@ fn verify_func(func: &IrFunc, program: &Program, errors: &mut Vec<VerifyError>) 
                             errors,
                         );
                     }
-                } else if func.ret != crate::ir::Ty::Unit {
+                } else if func.ret != crate::ir::Ty::Unit && func.sret_slot.is_none() {
+                    // Aggregate-returning functions deliver their value through the
+                    // hidden sret buffer, so a valueless Ret is their valid form.
                     fail(
                         format!(
                             "bb{} returns nothing where {} is expected",

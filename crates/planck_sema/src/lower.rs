@@ -1609,9 +1609,22 @@ impl<'a> FnBuilder<'a> {
                     }
                     self.clear_temp_borrows();
                     self.end_scope();
-                    self.terminate_and_start(Term::Ret {
-                        value: Some(value.vreg),
-                    });
+                    if is_scalar_shaped(&ret_ty) {
+                        self.terminate_and_start(Term::Ret {
+                            value: Some(value.vreg),
+                        });
+                    } else {
+                        // Aggregate arm values travel as addresses: memcpy into the
+                        // sret buffer and return unit-style per the return contract.
+                        if let Some(sret) = self.func.sret_slot {
+                            self.emit(Inst::StoreStructFromAddr {
+                                dst_slot: sret,
+                                src_addr: value.vreg,
+                                ty: ret_ty.clone(),
+                            });
+                        }
+                        self.terminate_and_start(Term::Ret { value: None });
+                    }
                 }
             }
             planck_parser::MatchBody::Block(block) => {
@@ -1743,9 +1756,22 @@ impl<'a> FnBuilder<'a> {
                     }
                     self.clear_temp_borrows();
                     self.end_scope();
-                    self.terminate_and_start(Term::Ret {
-                        value: Some(value.vreg),
-                    });
+                    if is_scalar_shaped(&ret_ty) {
+                        self.terminate_and_start(Term::Ret {
+                            value: Some(value.vreg),
+                        });
+                    } else {
+                        // Aggregate arm values travel as addresses: memcpy into the
+                        // sret buffer and return unit-style per the return contract.
+                        if let Some(sret) = self.func.sret_slot {
+                            self.emit(Inst::StoreStructFromAddr {
+                                dst_slot: sret,
+                                src_addr: value.vreg,
+                                ty: ret_ty.clone(),
+                            });
+                        }
+                        self.terminate_and_start(Term::Ret { value: None });
+                    }
                 }
             }
             planck_parser::MatchBody::Block(block) => {

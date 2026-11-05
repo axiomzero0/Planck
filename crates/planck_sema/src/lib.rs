@@ -171,10 +171,33 @@ mod tests {
         );
     }
 
-    // CEP:WHAT: Verifies that array bounds are checked at runtime behaves as specified.
-    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:WHAT: Verifies that aggregate-typed match arms follow the sret return contract.
+    // CEP:WHY: Regression pin for the Ret-address bug the verifier caught; arms must memcpy into the sret buffer.
     // CEP:STATUS: complete
-    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:FAILURE: The test fails if lowering produces a valueful Ret for aggregates.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn aggregate_returning_match_arms_use_sret_contract() {
+        // Regression: match arms returning aggregates must memcpy into the sret
+        // buffer and return valuelessly, not Ret the address (the verifier caught
+        // this as "&enum where enum expected" before the fix).
+        let program = lower_ok(
+            "enum St { A, B(i32) } \
+             fn pick(s: St, k: i32) -> St { match s { St::A => St::B(k), St::B(v) => St::A, _ => St::A } } \
+             fn main() -> i32 { let a: St = St::A; let b: St = pick(a, 7); return 0; }",
+        );
+        assert!(program
+            .funcs
+            .iter()
+            .any(|f| f.name == "pick" && f.sret_slot.is_some()));
+    }
+
+    // CEP:WHAT: Verifies that array indexing lowers an always-on bounds trap.
+    // CEP:WHY: Design Part 3 mandates bounds checks by default; the trap must be visible in the IR.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails if the bounds trap disappears from the IR.
     // CEP:ASSUMES: Fixture inputs are repository-controlled.
     // CEP:COST: Microseconds; unit test.
     // CEP:EVIDENCE: cargo test.
