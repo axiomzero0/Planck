@@ -1,0 +1,9 @@
+[package]
+name = "planck_lexer"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+description = "Tokenizer for the Planck language: turns UTF-8 source into a deterministic token stream."
+
+[dependencies]
+planck_support = { workspace = true }
