@@ -51,12 +51,14 @@ pub fn emit_assembly(program: &Program) -> String {
                         } else {
                             value.to_bits()
                         };
-                        if float_pool
-                            .insert((*is_f32, bits), format!("Lflt_{}", count))
-                            .is_none()
-                        {
+                        // Assign a label only when the constant is new: re-inserting
+                        // an existing key would rename its label and desynchronize
+                        // the counter, colliding with a later distinct constant.
+                        float_pool.entry((*is_f32, bits)).or_insert_with(|| {
+                            let label = format!("Lflt_{}", count);
                             count += 1;
-                        }
+                            label
+                        });
                     }
                 }
             }
@@ -142,6 +144,9 @@ struct FuncEmitter<'a> {
     frame: Frame,
     /// Vreg currently resident in %rax for load elision.
     forwarded: Option<u32>,
+    /// Number of division sites emitted so far in this function; distinguishes
+    /// the per-site `Ldiv_ok` labels of successive div/rem operations.
+    div_sites: usize,
     float_pool: &'a BTreeMap<(bool, u64), String>,
 }
 
@@ -159,6 +164,7 @@ impl<'a> FuncEmitter<'a> {
             fn_index,
             frame: frame::compute(func),
             forwarded: None,
+            div_sites: 0,
             float_pool,
         }
     }
@@ -1079,11 +1085,13 @@ fn emit_div(
 ) {
     let width = width_of(ty);
     let _ = suffix_label(width);
+    let div_site = em.div_sites;
+    em.div_sites += 1;
     // At this point %rcx holds b (widened) and %r10 holds a (widened) from the caller.
     if ty.is_signed() {
         // Guard the MinInt / -1 hardware fault with an explicit overflow trap.
         em.w("    cmpq $-1, %rcx");
-        em.w(&format!("    jne Ldiv_ok_{}", em.fn_index));
+        em.w(&format!("    jne Ldiv_ok_{}", div_site));
         let min = -(1i128 << (width * 8 - 1));
         if min < i32::MIN as i128 {
             // The immediate does not fit the signed 32-bit compare form; route it
@@ -1098,7 +1106,7 @@ fn emit_div(
             trap_label(TrapKind::Overflow),
             em.fn_index
         ));
-        em.w(&format!("Ldiv_ok_{}:", em.fn_index));
+        em.w(&format!("Ldiv_ok_{}:", div_site));
         reload_operand(em, a, ty);
         match width {
             8 => {
