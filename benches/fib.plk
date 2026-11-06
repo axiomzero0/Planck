@@ -1,0 +1,16 @@
+// Benchmark: recursive Fibonacci, fib(35).
+// Exercises: deep call recursion, checked i64 arithmetic on the hot path,
+// argument passing and the frame-resident calling convention.
+fn fib(n: i64) -> i64 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> i32 {
+    let r: i64 = fib(35);
+    print(r);
+    print('\n');
+    return 0;
+}

@@ -9,6 +9,22 @@ v0.1 implements the core language subset completely and honestly: see
 `design.md` and the CEP&CC standard, and [.cep/tickets.md](.cep/tickets.md)
 for everything deferred with tickets.
 
+## Benchmarks
+
+The harness in [benches/](benches/) compiles and runs six Planck programs
+against line-for-line C mirrors, cross-validating every configuration's
+output. On the reference machine (see
+[doc/BENCHMARKS.md](doc/BENCHMARKS.md) for the full report): generated code
+runs at 5.9x gcc -O2 (geometric mean; gcc -O0 is 3.2x), compilation takes
+40-80 ms -- the same league as gcc -- and the checked-by-default integer
+arithmetic costs under 2%. Reproduce with:
+
+```sh
+cargo build --release
+python3 benches/bench.py
+python3 benches/make_charts.py
+```
+
 ## Quick start
 
 ```sh

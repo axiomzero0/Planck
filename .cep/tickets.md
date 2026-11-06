@@ -33,6 +33,9 @@ Every non-complete implementation item in this repository carries exactly one ti
 | PLK-025 | System V aggregate argument classification | stub | Full by-value struct passing per the ABI. |
 | PLK-026 | Float stack arguments beyond eight | stub | Rejected with a comment today; needs stack-class floats. |
 | PLK-027 | Windows (PE/COFF) target | stub | Design Stage 7 names it; runtime needs a Windows port. |
+| PLK-028 | Benchmark harness and report | complete | `benches/`: six Planck/C cross-verified program pairs, `bench.py` (compile time, run time, text size, checked-vs-release), `make_charts.py`, results.json, doc/BENCHMARKS.md. Caught three real compiler bugs (duplicate div/float-pool labels, LICM nested-loop miscompile) now fixed with regression tests. |
+| PLK-029 | Bulk lowering of large aggregate literals | stub | Array/struct literals lower one store per element (matmul's 2304-element zero literal costs ~145 KB of .text and doubles its compile time). Lower all-zero and constant-element runs to `rep stos`/memcpy in codegen. |
+| PLK-030 | Language ergonomics rulings surfaced by benchmarking | stub | Needs spec decisions (design.md updates), not local fixes: repeat-array expression `[v; N]`; `if` as expression; integer literal typing when it is the left operand of a binary (does not widen to the other operand); reference-parameter forwarding and method calls through references (`PLK-S0006`/`PLK-S0017` shape helper-function design). |
 
 ## Rules for this file
 

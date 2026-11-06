@@ -1,0 +1,25 @@
+// Benchmark: Mandelbrot escape iteration over a 400x300 lattice.
+// Exercises: f64 arithmetic and comparisons (SSA-fought x87/SSE paths in the
+// codegen), nested loops, i64 accumulation, mixed int/float casts.
+fn main() -> i32 {
+    let mut total: i64 = 0;
+    for py in 0..300 {
+        let y0: f64 = py as f64 * 0.01 - 1.5;
+        for px in 0..400 {
+            let x0: f64 = px as f64 * 0.01 - 2.0;
+            let mut x: f64 = 0.0;
+            let mut y: f64 = 0.0;
+            let mut it: i32 = 0;
+            while it < 100 && x * x + y * y <= 4.0 {
+                let xt: f64 = x * x - y * y + x0;
+                y = 2.0 * x * y + y0;
+                x = xt;
+                it = it + 1;
+            }
+            total = total + it as i64;
+        }
+    }
+    print(total);
+    print('\n');
+    return 0;
+}

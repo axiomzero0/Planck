@@ -1,0 +1,28 @@
+// Benchmark: 11-queens via bitmask backtracking, 10 repetitions.
+// Exercises: i64 bitwise logic (xor/and/shifts), recursion with several i64
+// arguments, checked counter arithmetic, and branch-heavy control flow.
+fn solve(cols: i64, ld: i64, rd: i64, full: i64) -> i32 {
+    if cols == full {
+        return 1;
+    }
+    let mut avail: i64 = full ^ ((cols | ld | rd) & full);
+    let mut count: i32 = 0;
+    while avail != 0 {
+        let bit: i64 = avail & (-avail);
+        avail = avail ^ bit;
+        count = count + solve(cols | bit, (ld | bit) << 1, (rd | bit) >> 1, full);
+    }
+    return count;
+}
+
+fn main() -> i32 {
+    let one: i64 = 1;
+    let full: i64 = (one << 11) - 1;
+    let mut total: i32 = 0;
+    for r in 0..10 {
+        total = total + solve(0, 0, 0, full);
+    }
+    print(total);
+    print('\n');
+    return 0;
+}

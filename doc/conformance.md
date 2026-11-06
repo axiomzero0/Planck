@@ -105,7 +105,7 @@ they require — move checking and deferred initialization — is complete).
 | Ch. 38.18 IR verification | complete | verifier gates after lowering and after every pass; phi/Arg placement rules; reaching-definitions check for post-destruction vregs |
 | Ch. 38.20 pass pipeline contract | complete | versioned pipeline `planck-opt-0.2.0` with fixed order |
 | Ch. 38.11-38.13 compile budgets, trust model | complete | every HPC-COMPILE-COST field states O(n) bounds; inputs are untrusted by construction |
-| Ch. 61 industrial testing | partial: 123 unit/integration/e2e tests, golden IR, determinism gate; no fuzzing harness | PLK-023 |
+| Ch. 61 industrial testing | partial: 125 unit/integration/e2e tests, golden IR, determinism gate, plus a cross-verified benchmark suite (`benches/`, doc/BENCHMARKS.md) that diff-tests generated-code output against gcc-compiled mirrors; no fuzzing harness | PLK-023 |
 
 ## Known limitations
 
