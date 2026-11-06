@@ -77,8 +77,13 @@ pub struct OptResult {
 pub fn optimize(program: &mut Program) -> OptResult {
     let mut per_pass = Vec::new();
     let mut total = 0usize;
+    let trace = std::env::var("PLANCK_TRACE_IR").is_ok();
     for (name, pass) in PIPELINE {
         let changes = pass(program);
+        if trace {
+            eprintln!("===== after pass {} ({} changes) =====", name, changes);
+            eprint!("{}", planck_ir::print_program(program));
+        }
         let findings = verify_program(program);
         if !findings.is_empty() {
             // A pass produced invalid IR: this is a compiler bug surfaced by the gate.

@@ -502,3 +502,59 @@ fn driver_rejects_use_after_move() {
     assert!(stderr.contains("PLK-S0023"), "stderr: {}", stderr);
     assert!(stderr.contains("use of moved value"), "stderr: {}", stderr);
 }
+
+// CEP:WHAT: Verifies that nested range loops re-initialize the inner induction variable behaves as specified.
+// CEP:WHY: Regression pin: LICM used to hoist the inner loop's initialization (a loop-carried vreg after SSA destruction) out of the outer loop, so the inner loop ran only on the first outer iteration.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails on unexpected output or exit status.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: One driver invocation plus one link.
+// CEP:EVIDENCE: cargo test -p planckc.
+#[test]
+fn nested_for_loops_reinitialize_inner_induction() {
+    let src = concat!(
+        "fn main() -> i32 { ",
+        "let mut t: i32 = 0; ",
+        "for py in 0..3 { for px in 0..4 { t = t + 1; } } ",
+        "print(t); print('\\n'); ",
+        "let mut f: i64 = 0; ",
+        "for a in 0..5 { for b in 0..3 { for c in 0..2 { f = f + a as i64 + b as i64 + c as i64; } } } ",
+        "print(f); print('\\n'); ",
+        "return 0; }"
+    );
+    let outcome = run_program(src, "nested_for");
+    assert_eq!(outcome.exit, 0);
+    // 12 = 3*4; 105 = sum(a+b+c) over a in 0..5, b in 0..3, c in 0..2
+    // (60 + 30 + 15).
+    assert_eq!(outcome.stdout, "12\n105\n");
+}
+
+// CEP:WHAT: Verifies that loop-carried float accumulation across nested loops behaves as specified.
+// CEP:WHY: Regression pin: the same LICM hazard on a float loop-carry with a short-circuit condition inside the inner loop.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails on unexpected output or exit status.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: One driver invocation plus one link.
+// CEP:EVIDENCE: cargo test -p planckc.
+#[test]
+fn nested_loops_with_float_carry() {
+    let src = concat!(
+        "fn main() -> i32 { ",
+        "let mut total: i64 = 0; ",
+        "for py in 0..4 { ",
+        "let y0: f64 = py as f64; ",
+        "for px in 0..5 { ",
+        "let mut x: f64 = 0.0; ",
+        "let mut it: i32 = 0; ",
+        "while it < 50 && x < y0 + 2.0 { x = x + 1.0; it = it + 1; } ",
+        "total = total + it as i64; ",
+        "} } ",
+        "print(total); print('\\n'); ",
+        "return 0; }"
+    );
+    let outcome = run_program(src, "nested_float");
+    assert_eq!(outcome.exit, 0);
+    // Per outer row py, each of the 5 inner iterations contributes py + 2
+    // escape steps: (2 + 3 + 4 + 5) * 5 = 70.
+    assert_eq!(outcome.stdout, "70\n");
+}

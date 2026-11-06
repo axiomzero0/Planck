@@ -39,11 +39,11 @@ The classic stage then runs over the phi-free result:
 
 7. `const_fold`: folds arithmetic, bitwise, comparison, and cast operations over block-local constant environments (copies of known constants fold too); folds `BrCond` on constants; removes unreachable blocks. Checked operations whose results would overflow are not folded, so their traps stay observable; division by a zero constant is never folded.
 8. `gvn_cse`: dominator-scoped value numbering over trap-free pure instructions with a single definition (multi-def vregs are excluded from CSE); duplicates are replaced by their dominating definitions in one rewrite sweep.
-9. `licm`: discovers natural loops via back edges, computes the reverse-reachable body, and hoists trap-free pure instructions whose operands have no definitions inside the loop to the unique preheader.
+9. `licm`: discovers natural loops via back edges, computes the reverse-reachable body, and hoists trap-free pure instructions whose operands have no definitions inside the loop to the unique preheader. A further safety rule pins vregs with more than one definition in the function: the pass runs after SSA destruction, where loop-carried variables carry phi-lowering copies, and hoisting one def of such a vreg would change what the next iteration reads on the preheader path.
 10. `peephole`: algebraic identities (x+0, x-0, x-x, x*0, x*1, x/1, x%1, shift-by-zero, boolean identities) and unchecked multiply-by-power-of-two to shift, with replacement chains resolved to fixpoint.
 11. `dce`: removes pure definitions whose results are unused, to fixpoint. Loads and copies are removable because the borrow checker guarantees reference validity; stores, calls, and traps are never removed.
 
-Each pass is O(N) to O(slots * N); the pipeline runs them in fixed order with verification O(N + E) between passes.
+Each pass is O(N) to O(slots * N); the pipeline runs them in fixed order with verification O(N + E) between passes. Setting `PLANCK_TRACE_IR=1` dumps the IR to stderr after every pass, which is how pass-level miscompiles are localized.
 
 ## Invariants
 

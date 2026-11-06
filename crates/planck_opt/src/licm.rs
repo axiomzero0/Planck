@@ -3,7 +3,7 @@
 // CEP:WHY: Invariant computations inside loops are re-executed every iteration for no benefit; hoisting them is the classic latency win (pass catalog item 81).
 // CEP:CLASS: CEP-1
 // CEP:STATUS: complete
-// CEP:FAILURE: Only instructions that cannot trap and have no memory effects are hoisted: Const, unchecked bitwise/shift operations, Not, Cast, AddrSlot, AddrOffset. Checked arithmetic and division stay in the loop because their traps are semantically part of the loop's behavior. Loops without a unique preheader are left untouched.
+// CEP:FAILURE: Only instructions that cannot trap and have no memory effects are hoisted: Const, unchecked bitwise/shift operations, Not, Cast, AddrSlot, AddrOffset. Checked arithmetic and division stay in the loop because their traps are semantically part of the loop's behavior. A further constraint is that the destination vreg must have exactly one definition in the whole function: the pass runs after SSA destruction, where loop-carried variables legitimately have several defs (phi copies), and hoisting one def of such a vreg would change the value later iterations observe on the preheader path. Loops without a unique preheader are left untouched.
 // CEP:ASSUMES: The dominator analysis is valid; back edges are edges from a block to one of its dominators.
 // CEP:COST: O(N) loop discovery plus O(N) hoisting sweeps per loop.
 // CEP:EVIDENCE: unit tests in this file.
@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use planck_ir::{BinOp, BlockId, Dominators, Inst, Program, Term, Vreg};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 // CEP:WHAT: Handles the run step of this stage per the design and the file header contract.
 // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
@@ -88,6 +88,18 @@ fn uses_of(inst: &Inst) -> Vec<u32> {
 // CEP:EVIDENCE: cargo test over the containing crate.
 fn run_on_func(func: &mut planck_ir::IrFunc) -> usize {
     let dominators = Dominators::compute(func);
+    // Def counts per vreg across the function. After SSA destruction a vreg may
+    // legitimately have several defs (phi copies landed in predecessors); moving
+    // one def of such a vreg out of a loop silently changes what the next
+    // iteration reads on the preheader path, so those vregs are pinned.
+    let mut def_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(dst) = def_of(inst) {
+                *def_counts.entry(dst.0).or_insert(0) += 1;
+            }
+        }
+    }
     // Find back edges: t -> h where h dominates t.
     let mut loops: Vec<(u32, u32)> = Vec::new();
     for (idx, block) in func.blocks.iter().enumerate() {
@@ -143,8 +155,12 @@ fn run_on_func(func: &mut planck_ir::IrFunc) -> usize {
             let block = &mut func.blocks[*node as usize];
             let mut kept: Vec<Inst> = Vec::with_capacity(block.insts.len());
             for inst in block.insts.drain(..) {
-                let hoist_this =
-                    hoistable(&inst) && uses_of(&inst).iter().all(|u| !loop_defs.contains(u));
+                let single_def = def_of(&inst)
+                    .map(|dst| def_counts.get(&dst.0) == Some(&1))
+                    .unwrap_or(false);
+                let hoist_this = hoistable(&inst)
+                    && single_def
+                    && uses_of(&inst).iter().all(|u| !loop_defs.contains(u));
                 if hoist_this {
                     hoisted.push(inst);
                     changes += 1;
@@ -271,8 +287,44 @@ mod tests {
         }
     }
 
-    // CEP:WHAT: Verifies that invariant xor moves to preheader behaves as specified.
-    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:WHAT: Verifies that a multiply-defined vreg's constant is not hoisted behaves as specified.
+    // CEP:WHY: Regression pin: SSA destruction leaves loop-carried variables with several defs; hoisting their in-loop init once skipped every later re-initialization (nested-for miscompile caught by the benchmark suite).
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn multi_def_const_stays_in_loop() {
+        let mut program = loop_program();
+        // Redefine v3 (the xor's dst) inside the loop with a copy: v3 now has
+        // two defs in the function, so the xor must stay in the loop body.
+        program.funcs[0].blocks[2].insts.push(Inst::Copy {
+            dst: Vreg(3),
+            src: Vreg(0),
+            ty: Ty::I32,
+        });
+        let _ = run(&mut program);
+        let bb0 = &program.funcs[0].blocks[0];
+        let bb2 = &program.funcs[0].blocks[2];
+        assert!(bb2.insts.iter().any(|inst| matches!(
+            inst,
+            Inst::Bin {
+                op: BinOp::BitXor,
+                ..
+            }
+        )));
+        assert!(!bb0.insts.iter().any(|inst| matches!(
+            inst,
+            Inst::Bin {
+                op: BinOp::BitXor,
+                ..
+            }
+        )));
+    }
+
+    // CEP:WHAT: Handles the invariant xor moves to preheader step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
     // CEP:STATUS: complete
     // CEP:FAILURE: The test fails on unexpected output or exit status.
     // CEP:ASSUMES: Fixture inputs are repository-controlled.
