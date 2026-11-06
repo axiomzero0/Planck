@@ -16,19 +16,42 @@ pub mod const_fold;
 pub mod dce;
 pub mod gvn;
 pub mod licm;
+pub mod out_ssa;
 pub mod peephole;
+pub mod sccp;
+pub mod ssa;
 
 use planck_ir::{verify_program, Program, VerifyError};
 
 /// The versioned pass pipeline. Order changes are a semantic event (standard 38.20).
-pub const PIPELINE_NAME: &str = "planck-opt-0.1.0";
-pub const PIPELINE_PASSES: &[&str] = &["const_fold", "gvn_cse", "licm", "peephole", "dce"];
+/// planck-opt-0.2.0 adds the SSA stage (PLK-003): construction, SCCP, LCSSA,
+/// redundant-phi elimination, destruction into edge copies, and copy propagation.
+pub const PIPELINE_NAME: &str = "planck-opt-0.2.0";
+pub const PIPELINE_PASSES: &[&str] = &[
+    "ssa_construct",
+    "sccp",
+    "lcssa",
+    "phi_cleanup",
+    "ssa_destroy",
+    "copy_prop",
+    "const_fold",
+    "gvn_cse",
+    "licm",
+    "peephole",
+    "dce",
+];
 
 /// A single optimization pass: mutates the program in place, returns the number of changes.
 pub type PassFn = fn(&mut Program) -> usize;
 
 /// The ordered pipeline with verification gates.
 pub const PIPELINE: &[(&str, PassFn)] = &[
+    ("ssa_construct", ssa::run),
+    ("sccp", sccp::run),
+    ("lcssa", out_ssa::lcssa),
+    ("phi_cleanup", out_ssa::phi_cleanup),
+    ("ssa_destroy", out_ssa::ssa_destroy),
+    ("copy_prop", out_ssa::copy_prop),
     ("const_fold", const_fold::run),
     ("gvn_cse", gvn::run),
     ("licm", licm::run),

@@ -45,9 +45,9 @@ This document maps every normative element of `design.md` (the Planck language a
 | Design stage | Status | Implementation mapping | Ticket |
 |---|---|---|---|
 | Stage 1: VSDG | partial | The frontend lowers AST directly to the CFG IR; the value/state edge separation is realized as pure instructions versus effect instructions, and the borrow checker operates before IR construction rather than on the graph | PLK-002 |
-| Stage 2: Sea of Nodes | partial | The IR keeps structured basic blocks instead of a floating sea; pure nodes are block-local SSA temporaries; phis are absent because locals live in frame slots | PLK-003 |
+| Stage 2: Sea of Nodes | partial | The IR keeps structured basic blocks instead of a floating sea; pure values are SSA vregs with phis at joins after slot promotion; the unstructured floating-sea form is not built | PLK-003 (remaining: floating nodes) |
 | Stage 3: Memory IR extraction (alias analysis, PEA, SROA) | stub | Aggregates are frame-resident; alias analysis is unnecessary at this shape | PLK-011 |
-| Stage 4: LLIR materialization | partial | The CFG IR is already materialized: leaders, terminators, dominators, natural loops | PLK-003 |
+| Stage 4: LLIR materialization | partial | The CFG IR is already materialized: leaders, terminators, dominators, natural loops; phi placement, LCSSA, and SSA destruction run in the optimizer (pipeline planck-opt-0.2.0) | PLK-003 |
 | Stage 5: Vector IR | stub | No vector types | PLK-017 |
 | Stage 6: Machine IR (DP selection, IRC regalloc) | partial | One-to-one selection with frame-resident values and rax forwarding; register allocation is implicit | PLK-012 |
 | Stage 7: assembly/object emission | partial | AT&T assembly through the system assembler; ELF via the system linker; no direct object emission or DWARF | PLK-018 |
@@ -57,10 +57,13 @@ This document maps every normative element of `design.md` (the Planck language a
 Implemented and verified in the pipeline (pass catalog numbers): constant
 folding (1, 2), local and global CSE/GVN (4, 21, 25), strength reduction (6),
 algebraic simplification (7), bitwise and boolean simplification (10, 11),
-shift folding (12), commutativity reordering (13), branch folding (41, 48),
-unreachable code elimination (44), jump threading through constant conditions
-(41), loop-invariant code motion (81), induction-variable simplification (88,
-96), global DCE (23, 5), and constant-propagation support passes (2, 22).
+shift folding (12), commutativity reordering (13), sparse conditional constant
+propagation with branch pruning (22), SSA construction and destruction (35),
+redundant phi elimination (38), loop-closed SSA normalization (40), branch
+folding (41, 48), unreachable code elimination (44), jump threading through
+constant conditions (41), loop-invariant code motion (81),
+induction-variable simplification (88, 96), global DCE (23, 5), and copy
+propagation feeding the classic stage.
 
 All other catalog entries are stubs tracked by PLK-013 (remaining local and
 global passes), PLK-016 (vectorization block), PLK-012 (backend block), and
@@ -98,11 +101,11 @@ they require — move checking and deferred initialization — is complete).
 | Ch. 32 file structure | partial: crate layout mirrors the pipeline; the hot/cold directory split is deferred until CEP-0 code exists | PLK-022 |
 | Ch. 33 naming | complete | NAMING rules enforced |
 | Ch. 38.10 deterministic translation | complete | e2e `compilation_is_deterministic` (byte-identical binaries) |
-| Ch. 38.17-38.19 IR contract | complete | doc/ir.md invariants; printable, hashable-shape, versioned, verified |
-| Ch. 38.18 IR verification | complete | verifier gates after lowering and after every pass; `pipeline.rs` test |
-| Ch. 38.20 pass pipeline contract | complete | versioned pipeline `planck-opt-0.1.0` with fixed order |
+| Ch. 38.17-38.19 IR contract | complete | doc/ir.md invariants (plir-0.2: phis, copies, args, multi-def reaching rule); printable, hashable-shape, versioned, verified |
+| Ch. 38.18 IR verification | complete | verifier gates after lowering and after every pass; phi/Arg placement rules; reaching-definitions check for post-destruction vregs |
+| Ch. 38.20 pass pipeline contract | complete | versioned pipeline `planck-opt-0.2.0` with fixed order |
 | Ch. 38.11-38.13 compile budgets, trust model | complete | every HPC-COMPILE-COST field states O(n) bounds; inputs are untrusted by construction |
-| Ch. 61 industrial testing | partial: 103 unit/integration/e2e tests, golden IR, determinism gate; no fuzzing harness | PLK-023 |
+| Ch. 61 industrial testing | partial: 123 unit/integration/e2e tests, golden IR, determinism gate; no fuzzing harness | PLK-023 |
 
 ## Known limitations
 

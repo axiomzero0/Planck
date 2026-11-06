@@ -8,7 +8,7 @@ Every non-complete implementation item in this repository carries exactly one ti
 |---|---|---|---|
 | PLK-001 | Workspace scaffold | complete | Initial crate layout; retained as the anchor for placeholder stubs that existed during staged construction. |
 | PLK-002 | VSDG stage (design Stage 1) | partial | Lower the borrow checker onto the graph and add explicit value/state edge types; the frontend currently lowers AST directly to the CFG IR. |
-| PLK-003 | Sea of Nodes + phi SSA + LCSSA (design Stages 2 and 4) | stub | Floating pure nodes, phi placement, loop-closed SSA. |
+| PLK-003 | Sea of Nodes + phi SSA + LCSSA (design Stages 2 and 4) | partial | Phi-joined SSA on the structured CFG is complete (pipeline planck-opt-0.2.0): pruned phi placement with dominator frontiers, Arg entry definitions, SCCP with branch pruning, LCSSA exit phis, redundant-phi elimination, SSA destruction with critical-edge splitting and swap-safe parallel copies, copy propagation. Remaining: floating pure nodes detached from blocks (full Sea of Nodes lowering). |
 | PLK-004 | Traits and impl dispatch | stub | Trait definitions, impl blocks for traits, static dispatch via monomorphization. |
 | PLK-005 | `dyn Trait` fat pointers | stub | Dynamic dispatch with explicit opt-in. |
 | PLK-006 | `unsafe`, raw pointers, bounds-check elision, inline assembly | stub | Design 2.9 surface with explicit unsafe boundaries. |

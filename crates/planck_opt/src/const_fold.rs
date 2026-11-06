@@ -115,13 +115,22 @@ fn fold_inst(inst: Inst, env: &mut BTreeMap<u32, Const>, changes: &mut usize) ->
             env.insert(dst.0, value.clone());
             Some(Inst::Const { dst, value })
         }
+        Inst::Copy { dst, src, ty } => {
+            // A copy of a known-constant vreg is that constant.
+            if let Some(value) = env.get(&src.0).cloned() {
+                *changes += 1;
+                env.insert(dst.0, value.clone());
+                return Some(Inst::Const { dst, value });
+            }
+            Some(Inst::Copy { dst, src, ty })
+        }
         // Effectful or unknown-value instructions invalidate nothing here because the
         // environment only tracks Const defs, which no effect can change.
         other => Some(other),
     }
 }
 
-enum FoldOutcome {
+pub(crate) enum FoldOutcome {
     Value(Const),
     Keep,
 }
@@ -133,7 +142,7 @@ enum FoldOutcome {
 // CEP:ASSUMES: See the file header for the stage-wide assumptions.
 // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
 // CEP:EVIDENCE: cargo test over the containing crate.
-fn fold_bin(op: BinOp, a: &Const, b: &Const, ty: &Ty, checked: bool) -> FoldOutcome {
+pub(crate) fn fold_bin(op: BinOp, a: &Const, b: &Const, ty: &Ty, checked: bool) -> FoldOutcome {
     // Integer folding path.
     if let (Const::Int(x, _), Const::Int(y, _)) = (a, b) {
         let width = int_width_bits(ty);
@@ -297,7 +306,7 @@ fn fold_bin(op: BinOp, a: &Const, b: &Const, ty: &Ty, checked: bool) -> FoldOutc
 // CEP:ASSUMES: See the file header for the stage-wide assumptions.
 // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
 // CEP:EVIDENCE: cargo test over the containing crate.
-fn fold_un(op: UnOp, a: &Const, ty: &Ty, checked: bool) -> Option<Const> {
+pub(crate) fn fold_un(op: UnOp, a: &Const, ty: &Ty, checked: bool) -> Option<Const> {
     match (op, a) {
         (UnOp::Neg, Const::Int(x, _)) => {
             let width = int_width_bits(ty);
@@ -323,7 +332,7 @@ fn fold_un(op: UnOp, a: &Const, ty: &Ty, checked: bool) -> Option<Const> {
 // CEP:ASSUMES: See the file header for the stage-wide assumptions.
 // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
 // CEP:EVIDENCE: cargo test over the containing crate.
-fn fold_cast(a: &Const, from: &Ty, to: &Ty) -> Option<Const> {
+pub(crate) fn fold_cast(a: &Const, from: &Ty, to: &Ty) -> Option<Const> {
     match (a, to) {
         (Const::Int(x, _), to_ty) if to_ty.is_integer() => {
             let width = int_width_bits(to_ty);

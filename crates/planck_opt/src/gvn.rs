@@ -60,6 +60,8 @@ fn inst_key(inst: &Inst) -> Option<String> {
             ..
         } => Some(format!("addr:{}:{}:{}", slot.0, pointee.name(), mutable)),
         Inst::Const { value, .. } => Some(format!("const:{:?}", value)),
+        // Copies, phis, and args are excluded: phi destinations are multi-def
+        // after SSA destruction, and copies are copy_prop's business.
         _ => None,
     }
 }
@@ -87,6 +89,17 @@ fn is_trivially_pure(inst: &Inst) -> bool {
 fn run_on_func(func: &mut planck_ir::IrFunc) -> usize {
     let dominators = Dominators::compute(func);
     let n = func.blocks.len();
+    // Multi-def vregs (former phi destinations after SSA destruction) must
+    // never be CSE candidates: replacing their uses globally would bypass the
+    // definitions on the other incoming edges.
+    let mut def_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let Some(dst) = inst.def_vreg() {
+                *def_counts.entry(dst.0).or_default() += 1;
+            }
+        }
+    }
     // Children of each block in the dominator tree.
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); n];
     for (idx, idom) in dominators.idom.iter().enumerate() {
@@ -116,6 +129,9 @@ fn run_on_func(func: &mut planck_ir::IrFunc) -> usize {
                     None => continue,
                 };
                 let dst = def_of(inst).expect("pure inst has a def");
+                if def_counts.get(&dst.0).copied().unwrap_or(1) > 1 {
+                    continue;
+                }
                 if let Some(existing) = scope.get(&key) {
                     if *existing != dst.0 {
                         replacements.insert(dst.0, *existing);
@@ -232,6 +248,15 @@ fn rewrite_uses(inst: &mut Inst, map: &impl Fn(Vreg) -> Vreg) {
         Inst::TrapIf { cond, .. } => {
             *cond = map(*cond);
         }
+        Inst::Phi { inputs, .. } => {
+            for (_, value) in inputs.iter_mut() {
+                *value = map(*value);
+            }
+        }
+        Inst::Copy { src, .. } => {
+            *src = map(*src);
+        }
+        Inst::Arg { .. } => {}
         Inst::Const { .. } | Inst::AddrSlot { .. } | Inst::Trap { .. } | Inst::Comment { .. } => {}
     }
 }
