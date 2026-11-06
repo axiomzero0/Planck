@@ -1,4 +1,4 @@
-// plir-0.1 | planck ir | pipeline planck-opt-0.1.0
+// plir-0.2 | planck ir | pipeline planck-opt-0.2.0
 struct #0 Accumulator size=8 align=4 {
     total: i32 @0
     steps: i32 @4
@@ -17,18 +17,14 @@ bb0:
     store s1 <- *v2: struct#0 [memcpy]
     v3: i32 = const 1
     v4: i32 = const 4
-    store s2 <- v3: i32
-    store s3 <- v4: i32
+    v19: i32 = const 1
     v8: &mut struct#0 = addr s1
     br bb1
 bb1:
-    v5: i32 = load s2
-    v6: i32 = load s3
-    v7: i32 = le i32 5, 6
+    v7: i32 = le i32 19, 4
     br_cond v7, bb2, bb3
 bb2:
-    v9: i32 = load s2
-    call fn#1(&v8, v9)
+    call fn#1(&v8, v19)
     br bb4
 bb3:
     v14: i32 = load s1
@@ -38,24 +34,20 @@ bb3:
     v18: i32 = load s1
     ret v18
 bb4:
-    v12: i32 = load s2
-    v13: i32 = add i32 12, 3
-    store s2 <- v13: i32
+    v13: i32 = add i32 19, 3
+    v19: i32 = copy v13
     br bb1
 }
 fn Accumulator::record(self: &mut struct#0 @s0, value: i32 @s1) -> () {
 bb0:
-    v0: &mut struct#0 = load s0
-    v1: &mut struct#0 = load s0
-    v2: i32 = load *v1
-    v3: i32 = load s1
-    v4: i32 = add i32 2, 3 [checked]
-    store *v0 <- v4: i32
-    v5: &mut struct#0 = load s0
-    v6: &mut struct#0 = load s0
-    v7: i32 = load *v6 + 4
+    v10: &mut struct#0 = arg 0
+    v11: i32 = arg 1
+    v2: i32 = load *v10
+    v4: i32 = add i32 2, 11 [checked]
+    store *v10 <- v4: i32
+    v7: i32 = load *v10 + 4
     v8: i32 = const 1
     v9: i32 = add i32 7, 8 [checked]
-    store *v5 + 4 <- v9: i32
+    store *v10 + 4 <- v9: i32
     ret
 }

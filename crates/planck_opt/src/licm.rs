@@ -65,19 +65,7 @@ fn defs_in_block(block: &planck_ir::Block) -> BTreeSet<u32> {
 }
 
 fn def_of(inst: &Inst) -> Option<Vreg> {
-    match inst {
-        Inst::Const { dst, .. }
-        | Inst::Bin { dst, .. }
-        | Inst::Un { dst, .. }
-        | Inst::Cast { dst, .. }
-        | Inst::AddrSlot { dst, .. }
-        | Inst::AddrOffset { dst, .. }
-        | Inst::LoadSlot { dst, .. }
-        | Inst::LoadField { dst, .. }
-        | Inst::LoadIndirect { dst, .. } => Some(*dst),
-        Inst::Call { dst, .. } => *dst,
-        _ => None,
-    }
+    inst.def_vreg()
 }
 
 // CEP:WHAT: Handles the uses of step of this stage per the design and the file header contract.
@@ -88,30 +76,7 @@ fn def_of(inst: &Inst) -> Option<Vreg> {
 // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
 // CEP:EVIDENCE: cargo test over the containing crate.
 fn uses_of(inst: &Inst) -> Vec<u32> {
-    let mut uses = Vec::new();
-    match inst {
-        Inst::Bin { a, b, .. }
-        | Inst::AddrOffset {
-            base: a, offset: b, ..
-        } => {
-            uses.push(a.0);
-            uses.push(b.0);
-        }
-        Inst::Un { a, .. } | Inst::Cast { src: a, .. } | Inst::LoadIndirect { addr: a, .. } => {
-            uses.push(a.0)
-        }
-        Inst::TrapIf { cond, .. } => uses.push(cond.0),
-        Inst::Call { sret, args, .. } => {
-            if let Some(sret) = sret {
-                uses.push(sret.0);
-            }
-            for arg in args {
-                uses.push(arg.value.0);
-            }
-        }
-        _ => {}
-    }
-    uses
+    inst.use_vregs().into_iter().map(|vreg| vreg.0).collect()
 }
 
 // CEP:WHAT: Handles the run on func step of this stage per the design and the file header contract.

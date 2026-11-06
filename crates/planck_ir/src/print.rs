@@ -14,7 +14,8 @@ use crate::ir::{Const, Inst, IrFunc, Program, Term, Ty};
 use std::fmt::Write;
 
 /// Header line stamped on every dump; changes are a semantic event per standard 38.20.
-pub const IR_FORMAT_VERSION: &str = "plir-0.1";
+/// plir-0.2 adds the phi, copy, and arg instructions of the SSA stage (PLK-003).
+pub const IR_FORMAT_VERSION: &str = "plir-0.2";
 
 // CEP:WHAT: Handles the print program step of this stage per the design and the file header contract.
 // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
@@ -27,7 +28,7 @@ pub fn print_program(program: &Program) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "// {} | planck ir | pipeline planck-opt-0.1.0",
+        "// {} | planck ir | pipeline planck-opt-0.2.0",
         IR_FORMAT_VERSION
     );
     for (idx, info) in program.structs.iter().enumerate() {
@@ -367,6 +368,19 @@ fn print_inst(out: &mut String, func: &IrFunc, inst: &Inst) {
         Inst::TrapIf { cond, trap } => format!("    trap_if v{}, {:?}", cond.0, trap),
         Inst::Trap { trap } => format!("    trap {:?}", trap),
         Inst::Comment { text } => format!("    ; {}", text),
+        Inst::Phi { dst, ty, inputs } => {
+            let parts: Vec<String> = inputs
+                .iter()
+                .map(|(pred, value)| format!("bb{}: v{}", pred.0, value.0))
+                .collect();
+            format!("    v{}: {} = phi {}", dst.0, ty.name(), parts.join(", "))
+        }
+        Inst::Copy { dst, src, ty } => {
+            format!("    v{}: {} = copy v{}", dst.0, ty.name(), src.0)
+        }
+        Inst::Arg { dst, index, ty } => {
+            format!("    v{}: {} = arg {}", dst.0, ty.name(), index)
+        }
     };
     let _ = writeln!(out, "{}", line);
 }

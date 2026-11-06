@@ -1,10 +1,10 @@
 // CEP:FILE: crates/planck_ir/src/ir.rs
-// CEP:WHAT: The Planck v0.1 intermediate representation: a typed control-flow graph of basic blocks with SSA temporaries and frame-slot locals.
-// CEP:WHY: A linear CFG with explicit frame slots keeps phi insertion out of the correctness-critical path for this milestone while remaining fully deterministic, printable, and verifiable per standard 38.17; full Sea-of-Nodes floating and phi-based SSA are tracked as tickets PLK-002 and PLK-003.
+// CEP:WHAT: The Planck intermediate representation: a typed control-flow graph of basic blocks with SSA temporaries, phi nodes for join values, and frame-slot locals for what the optimizer did not promote.
+// CEP:WHY: A linear CFG with explicit frame slots keeps the lowering contract simple while the SSA stage (PLK-003) promotes scalars into phi-joined vregs on demand; the shape remains fully deterministic, printable, and verifiable per standard 38.17; full Sea-of-Nodes floating is tracked as ticket PLK-002.
 // CEP:CLASS: CEP-1
 // CEP:STATUS: complete
 // CEP:FAILURE: The verifier reports use-def, type, terminator, and linkage violations as structured findings; the IR itself never panics on well-formed input, and the verifier rejects malformed input instead of assuming validity.
-// CEP:ASSUMES: Vregs are defined before use within a block or by a dominating block; slot indices are unique per function; all blocks are terminated; reference values are only produced by AddrSlot or loaded from reference-typed slots.
+// CEP:ASSUMES: Vregs are defined before use within a block or by a dominating block (after SSA destruction, former phi destinations may have one definition per incoming edge; the verifier then checks reachability of definitions); slot indices are unique per function; all blocks are terminated; phis occupy a leading prefix of their block with exactly one input per predecessor; Arg instructions appear only at the top of the entry block in parameter order; reference values are only produced by AddrSlot or loaded from reference-typed slots.
 // CEP:COST: IR construction is O(program size); printing is O(nodes); verification is O(nodes * avg-def-scope) with dominator queries O(1) after O(N^2) worst-case bitset dominance build, O(N log N) typical (Cooper-Harvey-Kennedy).
 // CEP:EVIDENCE: cargo test -p planck_ir; golden IR files in crates/planckc/tests.
 // CEP:SECURITY: IR nodes carry no untrusted strings except symbol names, which are only ever printed or emitted into symbol tables, never executed.
@@ -236,6 +236,17 @@ pub enum TrapKind {
     Panic,
 }
 
+/// Reads incoming argument `index` (0-based over `IrFunc::params`) into a vreg.
+/// Valid only at the top of the entry block, at most once per parameter, in
+/// parameter order; this is the SSA-style entry definition for promoted
+/// parameters. The verifier enforces the placement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArgInst {
+    pub dst: Vreg,
+    pub index: u32,
+    pub ty: Ty,
+}
+
 /// One call argument: a value vreg plus its type, or a by-reference pointer for aggregate passing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallArg {
@@ -347,6 +358,29 @@ pub enum Inst {
     Comment {
         text: String,
     },
+    /// SSA phi: merges one value per incoming edge. Phis occupy a leading
+    /// prefix of their block (the phi region), carry exactly one input per
+    /// predecessor, and are created only by the SSA construction stage.
+    Phi {
+        dst: Vreg,
+        ty: Ty,
+        /// One (predecessor, value) pair per incoming edge, in predecessor order.
+        inputs: Vec<(BlockId, Vreg)>,
+    },
+    /// Value copy between vregs. Pure and trap-free. SSA destruction lowers
+    /// phis to copies on predecessor edges; the copy propagator removes the
+    /// ones nobody needs.
+    Copy {
+        dst: Vreg,
+        src: Vreg,
+        ty: Ty,
+    },
+    /// Reads incoming argument `index` into a vreg (see `ArgInst`).
+    Arg {
+        dst: Vreg,
+        index: u32,
+        ty: Ty,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -424,5 +458,78 @@ impl IrFunc {
 
     pub fn inst_count(&self) -> usize {
         self.blocks.iter().map(|b| b.insts.len()).sum()
+    }
+}
+
+impl Inst {
+    /// The vreg this instruction defines, if any.
+    // CEP:WHAT: Handles the Names the vreg one instruction defines, if any, per the design and the file header contract. step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub fn def_vreg(&self) -> Option<Vreg> {
+        match self {
+            Inst::Const { dst, .. }
+            | Inst::Bin { dst, .. }
+            | Inst::Un { dst, .. }
+            | Inst::Cast { dst, .. }
+            | Inst::LoadSlot { dst, .. }
+            | Inst::LoadField { dst, .. }
+            | Inst::AddrSlot { dst, .. }
+            | Inst::AddrOffset { dst, .. }
+            | Inst::LoadIndirect { dst, .. }
+            | Inst::Phi { dst, .. }
+            | Inst::Copy { dst, .. }
+            | Inst::Arg { dst, .. } => Some(*dst),
+            Inst::Call { dst, .. } => *dst,
+            Inst::StoreSlot { .. }
+            | Inst::StoreField { .. }
+            | Inst::StoreIndirect { .. }
+            | Inst::StoreStructFromAddr { .. }
+            | Inst::TrapIf { .. }
+            | Inst::Trap { .. }
+            | Inst::Comment { .. } => None,
+        }
+    }
+
+    /// All vregs this instruction reads, in a deterministic order.
+    // CEP:WHAT: Handles the Enumerates the vregs one instruction reads, in a deterministic order, per the design and the file header contract. step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub fn use_vregs(&self) -> Vec<Vreg> {
+        match self {
+            Inst::Bin { a, b, .. } => vec![*a, *b],
+            Inst::Un { a, .. } | Inst::Cast { src: a, .. } => vec![*a],
+            Inst::AddrOffset { base, offset, .. } => vec![*base, *offset],
+            Inst::LoadIndirect { addr, .. } => vec![*addr],
+            Inst::StoreIndirect { addr, src, .. } => vec![*addr, *src],
+            Inst::StoreSlot { src, .. } | Inst::StoreField { src, .. } => vec![*src],
+            Inst::StoreStructFromAddr { src_addr, .. } => vec![*src_addr],
+            Inst::TrapIf { cond, .. } => vec![*cond],
+            Inst::Call { sret, args, .. } => {
+                let mut uses = Vec::new();
+                if let Some(sret) = sret {
+                    uses.push(*sret);
+                }
+                uses.extend(args.iter().map(|arg| arg.value));
+                uses
+            }
+            Inst::Phi { inputs, .. } => inputs.iter().map(|(_, value)| *value).collect(),
+            Inst::Copy { src, .. } => vec![*src],
+            Inst::LoadSlot { .. }
+            | Inst::LoadField { .. }
+            | Inst::AddrSlot { .. }
+            | Inst::Const { .. }
+            | Inst::Arg { .. }
+            | Inst::Trap { .. }
+            | Inst::Comment { .. } => Vec::new(),
+        }
     }
 }

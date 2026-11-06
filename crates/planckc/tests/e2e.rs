@@ -255,6 +255,29 @@ fn references_read_and_write() {
     assert_eq!(outcome.stdout, "43\n");
 }
 
+// CEP:WHAT: Verifies that float comparisons branch correctly behaves as specified.
+// CEP:WHY: Regression pin: the float comparison path previously emitted no comparison at all (emit_float_bin's catch-all), and then an inverted ucomisd operand order; both silently produced undefined branch conditions.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails on unexpected output or exit status.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: Microseconds; unit test.
+// CEP:EVIDENCE: cargo test.
+#[test]
+fn float_comparisons_branch_correctly() {
+    // Loop-carried: 1.5 * 2 three times reaches 12.0; the loop must run.
+    let outcome = run_program(
+        "fn main() -> i32 { let mut f: f64 = 1.5; while f < 10.0 { f = f * 2.0; } print(f as i32); print('\\n'); return 0; }",
+        "floop",
+    );
+    assert_eq!(outcome.stdout, "12\n");
+    // All six orderings on constants.
+    let outcome = run_program(
+        "fn main() -> i32 { let a: f64 = 1.0; let b: f64 = 2.0; print((a < b) as i32); print((a <= b) as i32); print((a > b) as i32); print((a >= b) as i32); print((a == b) as i32); print((a != b) as i32); print('\\n'); return 0; }",
+        "fcmp",
+    );
+    assert_eq!(outcome.stdout, "110001\n");
+}
+
 // CEP:WHAT: Verifies that overflow traps in debug mode behaves as specified.
 // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
 // CEP:STATUS: complete

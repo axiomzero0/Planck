@@ -13,9 +13,7 @@
 #![forbid(unsafe_code)]
 
 use crate::frame::{self, Frame};
-use planck_ir::{
-    BinOp, Callee, Const, Inst, Intrinsic, IrFunc, Program, Slot, Term, TrapKind, Ty, UnOp,
-};
+use planck_ir::{BinOp, Callee, Const, Inst, Intrinsic, IrFunc, Program, Term, TrapKind, Ty, UnOp};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -313,8 +311,23 @@ fn emit_func(
     if let (Some(_), Some(save_off)) = (func.sret_slot, em.frame.sret_save_offset) {
         em.w(&format!("    movq %rdi, -{}(%rbp)", save_off));
     }
-    // Spill parameters from their ABI registers into frame slots.
-    emit_param_spills(&mut em);
+    // Spill parameters from their ABI registers into frame slots. Parameters
+    // that the SSA stage promoted are read by their Arg instruction instead.
+    let promoted_params: std::collections::BTreeSet<u32> = func
+        .blocks
+        .first()
+        .map(|entry| {
+            entry
+                .insts
+                .iter()
+                .filter_map(|inst| match inst {
+                    Inst::Arg { index, .. } => Some(*index),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    emit_param_spills(&mut em, &promoted_params);
 
     for (block_idx, block) in func.blocks.iter().enumerate() {
         let _ = writeln!(em.out, "{}:", em.block_label(block_idx as u32));
@@ -413,61 +426,120 @@ fn emit_func(
 // CEP:ASSUMES: See the file header for the stage-wide assumptions.
 // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
 // CEP:EVIDENCE: cargo test over the containing crate.
-fn emit_param_spills(em: &mut FuncEmitter) {
-    let int_regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
+
+/// Where the System V ABI delivers parameter `index`. Shared by the prologue
+/// spills and the `Arg` instruction so the two can never disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArgLoc {
+    IntReg(usize),
+    XmmReg(usize),
+    Stack(usize),
+}
+
+const INT_ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
+
+// CEP:WHAT: Handles the Classifies each parameter into its System V ABI location per the design and the file header contract. step of this stage per the design and the file header contract.
+// CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+// CEP:ASSUMES: See the file header for the stage-wide assumptions.
+// CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+// CEP:EVIDENCE: cargo test over the containing crate.
+fn abi_param_locations(func: &IrFunc) -> Vec<ArgLoc> {
+    let mut locs = Vec::with_capacity(func.params.len());
     let mut int_idx = 0usize;
     let mut xmm_idx = 0usize;
     let mut stack_idx = 0usize;
-    let mut param_slots: Vec<(u32, &Ty)> = Vec::new();
-    for slot in &em.func.params {
-        let info = &em.func.slots[slot.0 as usize];
-        param_slots.push((slot.0, &info.ty));
-    }
-    for (slot_idx, ty) in param_slots {
-        match ty {
+    for slot in &func.params {
+        let ty = &func.slots[slot.0 as usize].ty;
+        let loc = match ty {
             Ty::F32 | Ty::F64 => {
-                let reg = format!("%xmm{}", xmm_idx);
+                let loc = ArgLoc::XmmReg(xmm_idx);
                 xmm_idx += 1;
-                let mem = em.slot_mem(Slot(slot_idx), 0);
-                let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
-                em.w(&format!("    mov{} {}, {}", suffix, reg, mem));
+                loc
             }
-            Ty::Struct(_) | Ty::Enum(_) | Ty::Array(_, _) => {
-                // Aggregates arrive as pointers to caller copies: memcpy into the slot.
-                let is_stack = int_idx >= int_regs.len();
-                let mem = em.slot_mem(Slot(slot_idx), 0);
-                if is_stack {
-                    let src = format!("{}(%rbp)", 16 + 8 * stack_idx);
-                    stack_idx += 1;
-                    em.w(&format!("    movq {}, %rsi", src));
-                } else {
-                    let reg = int_regs[int_idx];
+            _ => {
+                // Scalars and aggregate pointers share the integer register file.
+                if int_idx < INT_ARG_REGS.len() {
+                    let loc = ArgLoc::IntReg(int_idx);
                     int_idx += 1;
-                    em.w(&format!("    movq {}, %rsi", reg));
+                    loc
+                } else {
+                    let loc = ArgLoc::Stack(stack_idx);
+                    stack_idx += 1;
+                    loc
                 }
+            }
+        };
+        locs.push(loc);
+    }
+    locs
+}
+
+// CEP:WHAT: Handles the Spills non-promoted parameters from their ABI registers into frame slots per the design and the file header contract. step of this stage per the design and the file header contract.
+// CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+// CEP:ASSUMES: See the file header for the stage-wide assumptions.
+// CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+// CEP:EVIDENCE: cargo test over the containing crate.
+fn emit_param_spills(em: &mut FuncEmitter, promoted: &std::collections::BTreeSet<u32>) {
+    let locs = abi_param_locations(em.func);
+    for (param_idx, slot) in em.func.params.iter().enumerate() {
+        // Promoted parameters are read by their Arg instruction in the entry
+        // block; spilling them here would be dead work into a dead slot.
+        if promoted.contains(&(param_idx as u32)) {
+            continue;
+        }
+        let ty = &em.func.slots[slot.0 as usize].ty;
+        let loc = locs[param_idx];
+        match (ty, loc) {
+            (Ty::F32 | Ty::F64, ArgLoc::XmmReg(xmm)) => {
+                let mem = em.slot_mem(*slot, 0);
+                let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
+                em.w(&format!("    mov{} %xmm{}, {}", suffix, xmm, mem));
+            }
+            (Ty::Struct(_) | Ty::Enum(_) | Ty::Array(_, _), loc) => {
+                // Aggregates arrive as pointers to caller copies: memcpy into the slot.
+                match loc {
+                    ArgLoc::IntReg(reg_idx) => {
+                        em.w(&format!("    movq {}, %rsi", INT_ARG_REGS[reg_idx]));
+                    }
+                    ArgLoc::Stack(stack_idx) => {
+                        let src = format!("{}(%rbp)", 16 + 8 * stack_idx);
+                        em.w(&format!("    movq {}, %rsi", src));
+                    }
+                    ArgLoc::XmmReg(_) => {
+                        // Rejected at the language level (PLK-026): floats never
+                        // exhaust the eight XMM registers in v0.1.
+                        em.w("    ud2 # float aggregate parameter (unreachable)");
+                    }
+                }
+                let mem = em.slot_mem(*slot, 0);
                 em.w(&format!("    lea {}, %rdi", mem));
                 let size = em.tables_size_of(ty);
                 em.w(&format!("    movq ${}, %rcx", size));
                 em.w("    rep movsb");
             }
-            _ => {
-                // Spill with the parameter's own width: the frame packs narrow slots
-                // adjacently, so an 8-byte store into a 4-byte slot would corrupt the
-                // neighboring slot's bytes.
-                if int_idx < int_regs.len() {
-                    let reg = int_regs[int_idx];
-                    int_idx += 1;
-                    let mem = em.slot_mem(Slot(slot_idx), 0);
-                    // store_insn writes from %rax; bring the ABI register there first.
-                    em.w(&format!("    movq {}, %rax", reg));
-                    em.w(&format!("    {}", store_insn(ty, &mem)));
-                } else {
-                    let mem = em.slot_mem(Slot(slot_idx), 0);
-                    let src = format!("{}(%rbp)", 16 + 8 * stack_idx);
-                    stack_idx += 1;
-                    em.w(&format!("    {}", load_insn(ty, &src)));
-                    em.w(&format!("    {}", store_insn(ty, &mem)));
-                }
+            (_, ArgLoc::IntReg(reg_idx)) => {
+                // Spill with the parameter's own width: the frame packs narrow
+                // slots adjacently, so an 8-byte store into a 4-byte slot
+                // would corrupt the neighboring slot's bytes.
+                let mem = em.slot_mem(*slot, 0);
+                // store_insn writes from %rax; bring the ABI register there first.
+                em.w(&format!("    movq {}, %rax", INT_ARG_REGS[reg_idx]));
+                em.w(&format!("    {}", store_insn(ty, &mem)));
+            }
+            (_, ArgLoc::Stack(stack_idx)) => {
+                let mem = em.slot_mem(*slot, 0);
+                let src = format!("{}(%rbp)", 16 + 8 * stack_idx);
+                em.w(&format!("    {}", load_insn(ty, &src)));
+                em.w(&format!("    {}", store_insn(ty, &mem)));
+            }
+            (_, ArgLoc::XmmReg(_)) => {
+                // Floats always take the XMM arm above; a non-float can never
+                // be classified into XMM.
+                em.w("    ud2 # unexpected XMM parameter class (unreachable)");
             }
         }
     }
@@ -676,6 +748,45 @@ fn emit_inst(em: &mut FuncEmitter, inst: &Inst) {
             em.w(&format!("    jmp {}_{}", trap_label(*trap), em.fn_index));
         }
         Inst::Comment { .. } => {}
+        Inst::Copy { dst, src, ty } => {
+            // Load src into %rax (or %xmm0), store to dst: the frame-resident
+            // model makes a copy a load followed by a store, with rax
+            // forwarding eliding the load when src was just produced.
+            em.load_vreg(src.0, ty);
+            em.store_vreg(dst.0, ty);
+        }
+        Inst::Arg { dst, index, ty } => {
+            // Reads the ABI location of parameter `index`. The verifier
+            // restricts Arg to the entry-block prefix, so no call can have
+            // clobbered the register yet.
+            let locs = abi_param_locations(em.func);
+            let loc = locs
+                .get(*index as usize)
+                .copied()
+                .unwrap_or(ArgLoc::Stack(0));
+            match loc {
+                ArgLoc::IntReg(reg_idx) => {
+                    em.w(&format!("    movq {}, %rax", INT_ARG_REGS[reg_idx]));
+                    em.store_vreg(dst.0, ty);
+                }
+                ArgLoc::XmmReg(xmm) => {
+                    let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
+                    em.w(&format!("    mov{} %xmm{}, %xmm0", suffix, xmm));
+                    em.store_vreg(dst.0, ty);
+                }
+                ArgLoc::Stack(stack_idx) => {
+                    let src = format!("{}(%rbp)", 16 + 8 * stack_idx);
+                    em.w(&format!("    {}", load_insn(ty, &src)));
+                    em.store_vreg(dst.0, ty);
+                }
+            }
+        }
+        Inst::Phi { .. } => {
+            // Phis are lowered to edge copies by SSA destruction before
+            // codegen; reaching this point is an internal invariant violation,
+            // so abort loudly instead of emitting wrong code.
+            em.w("    ud2 # phi reached codegen (internal invariant violated)");
+        }
     }
 }
 
@@ -762,7 +873,11 @@ fn emit_bin(
     let width = width_of(ty);
     let suffix = int_suffix(width);
     if ty.is_float() {
-        emit_float_bin(em, op, dst, a, b, ty);
+        if op.is_comparison() {
+            emit_float_cmp(em, op, dst, a, b, ty);
+        } else {
+            emit_float_bin(em, op, dst, a, b, ty);
+        }
         return;
     }
     if op.is_comparison() {
@@ -1143,12 +1258,11 @@ fn emit_float_cmp(
     em.load_vreg(a.0, ty);
     em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
     em.load_vreg(b.0, ty);
-    // Order: compare b against a: ucomis b_reg, a_reg sets flags for a ? b.
-    em.w(&format!(
-        "    ucomi{} %xmm2, %xmm0",
-        if *ty == Ty::F32 { "s" } else { "d" }
-    ));
-    // Flags: for ucomisd %xmm2, %xmm0 → compares xmm0 with xmm2 (xmm0 OP xmm2).
+    // Operand order: a lands in %xmm2, b in %xmm0. AT&T `ucomis src, dst`
+    // maps to Intel UCOMISD dst, src, so `ucomis %xmm0, %xmm2` compares
+    // %xmm2 (a) against %xmm0 (b) and the flags reflect `a OP b`.
+    em.w(&format!("    ucomi{} %xmm0, %xmm2", suffix));
+    // Flags: setcc below selects on `a OP b` directly.
     let set = match op {
         BinOp::Eq => "sete",
         BinOp::Ne => "setne",
