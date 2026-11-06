@@ -618,9 +618,31 @@ fn emit_inst(em: &mut FuncEmitter, inst: &Inst) {
         } => {
             em.load_vreg(addr.0, &Ty::U64);
             em.w("    movq %rax, %rcx");
-            em.load_vreg(src.0, ty);
-            let store = store_insn(ty, &format!("{}(%rcx)", offset));
-            em.w(&format!("    {}", store));
+            // Aggregate pointees travel by address: memcpy the pointee bytes
+            // from the source address into addr+offset (address-value
+            // convention). The source vreg holds the source address.
+            let pointee = match ty {
+                Ty::Ref(inner, _) => Some(inner.as_ref().clone()),
+                _ => None,
+            };
+            match pointee {
+                // Structs and enums have no scalar size; Unit never stores.
+                Some(pointee_ty)
+                    if pointee_ty.scalar_size().is_none() && !matches!(pointee_ty, Ty::Unit) =>
+                {
+                    let size = em.tables_size_of(&pointee_ty);
+                    em.load_vreg(src.0, &Ty::U64);
+                    em.w("    movq %rax, %rsi");
+                    em.w(&format!("    lea {}(%rcx), %rdi", offset));
+                    em.w(&format!("    movq ${}, %rcx", size));
+                    em.w("    rep movsb");
+                }
+                _ => {
+                    em.load_vreg(src.0, ty);
+                    let store = store_insn(ty, &format!("{}(%rcx)", offset));
+                    em.w(&format!("    {}", store));
+                }
+            }
         }
         Inst::StoreStructFromAddr {
             dst_slot,

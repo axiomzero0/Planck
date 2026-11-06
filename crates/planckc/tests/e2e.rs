@@ -414,3 +414,68 @@ fn optimizer_preserves_program_semantics() {
     );
     assert_eq!(outcome.stdout, "105\n");
 }
+
+// CEP:WHAT: Verifies that ownership moves and deferred init run end to end behaves as specified.
+// CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails on unexpected output or exit status.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: One driver invocation plus one link.
+// CEP:EVIDENCE: cargo test -p planckc.
+#[test]
+fn ownership_moves_and_deferred_init_run() {
+    // Exercises: deferred initialization with branch merging, moves into call
+    // arguments and enum payloads, field reassignment, and aggregate payload
+    // bindings out of a match.
+    let src = concat!(
+        "struct P { x: i32, y: i32 } ",
+        "enum W { S(P), N } ",
+        "fn take(p: P) -> i32 { return p.x + p.y; } ",
+        "fn unwrap_y(w: W) -> i32 { match w { W::S(v) => v.y * 100, _ => 0 } } ",
+        "fn main() -> i32 { ",
+        "let mut p: P; ",
+        "let c: i32 = 1; ",
+        "if c > 0 { p = P { x: 10, y: 20 }; } else { p = P { x: 0, y: 0 }; } ",
+        "let a: i32 = take(p); ",
+        "p = P { x: 1, y: 2 }; ",
+        "let w: W = W::S(p); ",
+        "let b: i32 = unwrap_y(w); ",
+        "return a + b; ",
+        "}"
+    );
+    let outcome = run_program(src, "ownership");
+    assert_eq!(outcome.exit, 30 + 200);
+}
+
+// CEP:WHAT: Verifies that the driver rejects use after move behaves as specified.
+// CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails if the driver accepts the program or reports the wrong code.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: One driver invocation.
+// CEP:EVIDENCE: cargo test -p planckc.
+#[test]
+fn driver_rejects_use_after_move() {
+    let dir = std::env::temp_dir().join(format!("planckc_e2e_move_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let source_path = dir.join("move.plk");
+    std::fs::write(
+        &source_path,
+        concat!(
+            "struct P { x: i32 } ",
+            "fn eat(p: P) -> i32 { return p.x; } ",
+            "fn main() -> i32 { let p: P = P { x: 1 }; let q: P = p; return eat(p); }"
+        ),
+    )
+    .expect("write");
+    let out = Command::new(driver())
+        .args(["build", source_path.to_str().expect("utf8"), "-o"])
+        .arg(dir.join("out"))
+        .output()
+        .expect("driver runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("PLK-S0023"), "stderr: {}", stderr);
+    assert!(stderr.contains("use of moved value"), "stderr: {}", stderr);
+}

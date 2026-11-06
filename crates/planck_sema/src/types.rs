@@ -358,11 +358,20 @@ fn register_enum(tables: &mut TypeTables, def: &EnumDef, diags: &mut Vec<Diag>) 
     });
 }
 
-/// Copy classification: a type is Copy when every component is trivially relocatable.
-/// The v0.1 core subset has no heap types, so every well-formed type is Copy; this predicate
-/// remains the single authority so heap types (ticket PLK-010) plug in without call-site changes.
+/// Copy classification per design Part 1 ("every value has exactly one owner;
+/// moving transfers ownership; copying requires explicit `Clone`").
+///
+/// Scalars (`i8..u64`, `f32/f64`, `bool`, `char`), the unit type, references
+/// (`&T`, `&mut T`, `&str`) are `Copy`: reading them never severs the source's
+/// ownership. Structs and enums are **not** `Copy`: every use that takes the
+/// value by value is a move, enforced by the move checker (PLK-010). Arrays are
+/// `Copy` exactly when their element type is, mirroring the value semantics of
+/// repeated element copy-out. Explicit `Clone` support arrives with traits
+/// (ticket PLK-004); until then a non-`Copy` value can only be re-obtained by
+/// reassignment, not by duplication.
 pub fn is_copy(ty: &Ty) -> bool {
     match ty {
+        Ty::Struct(_) | Ty::Enum(_) => false,
         Ty::Array(elem, _) => is_copy(elem),
         _ => true,
     }

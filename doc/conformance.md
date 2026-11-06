@@ -31,7 +31,9 @@ This document maps every normative element of `design.md` (the Planck language a
 | Property | Status | Notes |
 |---|---|---|
 | Static, strong typing; no coercions | complete | sema rejects every implicit conversion |
-| One-owner values, move semantics | partial: all v0.1 types are Copy because no heap types exist; the move checker engages with PLK-010 | documented in doc/sema.md |
+| One-owner values, move semantics | complete for value types: structs/enums/arrays-of-non-Copy are non-Copy; use-after-move, double moves, partial moves, moves out of references/elements, move-while-borrowed, and moves in loops are compile errors | doc/sema.md; sema ownership tests; e2e `ownership_moves_and_deferred_init_run`, `driver_rejects_use_after_move` |
+| Deferred initialization (`let` without initializer) with definite assignment | complete for the core subset: branch intersection, loop conservatism, diverging-arm exemption | sema deferred-init tests; doc/sema.md |
+| Heap types, allocators, drop elaboration | stub | PLK-010 (remaining scope) |
 | Borrowing, no mutable aliasing | complete (statement-scoped + let-persistent conservative model) | PLK-015 for NLL regions |
 | Null safety via `Option` | stub | PLK-009 |
 | Layout control attributes | partial: declaration-order layout with natural alignment; `#[repr(...)]` parsed | PLK-019 |
@@ -81,7 +83,8 @@ for serialized IR (SIR) emission.
 Partial. The runtime is Tier 3 only (`rt`): print builtins and the panic
 handler in `runtime/planck_rt.c`, explicitly linked, no hidden state. Tier 1
 `core` traits and Tier 2 `std` collections with explicit allocators are
-PLK-010.
+PLK-010 (remaining scope: heap types and allocators; the ownership machinery
+they require — move checking and deferred initialization — is complete).
 
 ## standard.md (CEP&CC 0.4) conformance
 
@@ -99,13 +102,16 @@ PLK-010.
 | Ch. 38.18 IR verification | complete | verifier gates after lowering and after every pass; `pipeline.rs` test |
 | Ch. 38.20 pass pipeline contract | complete | versioned pipeline `planck-opt-0.1.0` with fixed order |
 | Ch. 38.11-38.13 compile budgets, trust model | complete | every HPC-COMPILE-COST field states O(n) bounds; inputs are untrusted by construction |
-| Ch. 61 industrial testing | partial: 78 unit/integration/e2e tests, golden IR, determinism gate; no fuzzing harness | PLK-023 |
+| Ch. 61 industrial testing | partial: 103 unit/integration/e2e tests, golden IR, determinism gate; no fuzzing harness | PLK-023 |
 
 ## Known limitations
 
 - The borrow checker is conservative: borrows live to the end of their
   statement (or enclosing block when bound by `let`), so some programs that
   NLL would accept are rejected.
+- The move checker is conservative in loops: values live at loop entry cannot
+  be moved inside the body, and loop-body assignments do not establish
+  definite initialization after the loop.
 - Struct passing uses hidden-pointer sret returns and by-reference caller
   copies rather than the full System V aggregate classification.
 - Float printing uses a fixed `%.6f` format; `u64`-to-float conversions above

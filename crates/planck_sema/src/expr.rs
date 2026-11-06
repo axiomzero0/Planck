@@ -56,7 +56,7 @@ impl<'a> FnBuilder<'a> {
             } => self.lower_method(receiver, method, args, *span),
             Expr::Field { .. } | Expr::Index { .. } | Expr::Deref { .. } => {
                 match self.resolve_lvalue(expr) {
-                    Some(lvalue) => self.read_from_lvalue(&lvalue),
+                    Some(lvalue) => self.read_from_lvalue(&lvalue, false, expr.span()),
                     None => Lowered {
                         vreg: self.vreg(Ty::Unit),
                         ty: Ty::Unit,
@@ -108,7 +108,11 @@ impl<'a> FnBuilder<'a> {
                     };
                 }
                 // Infer from the first element; remaining elements must match.
-                let first = self.lower_expr(&elems[0], None);
+                // A non-Copy first element is a move source, so it is consumed.
+                let first = match self.peek_expr_type(&elems[0]) {
+                    Some(ty) if !is_copy(&ty) => self.consume_expr(&elems[0], &ty),
+                    _ => self.lower_expr(&elems[0], None),
+                };
                 let first_ty = first.ty.clone();
                 return self.finish_array_literal(
                     elems,
@@ -162,7 +166,11 @@ impl<'a> FnBuilder<'a> {
                     pre
                 }
                 None => {
-                    let value = self.lower_expr(elem_expr, Some(&elem_ty));
+                    let value = if !is_copy(&elem_ty) {
+                        self.consume_expr(elem_expr, &elem_ty)
+                    } else {
+                        self.lower_expr(elem_expr, Some(&elem_ty))
+                    };
                     if value.ty != elem_ty {
                         self.report_mismatch(elem_expr.span(), &elem_ty, &value.ty);
                         continue;
@@ -306,18 +314,20 @@ impl<'a> FnBuilder<'a> {
                 };
             }
         };
-        self.check_owner_use(binding.slot, &ident.name, false, ident.span);
+        self.check_owner_use(binding.slot, &ident.name, "use", ident.span);
         let lvalue = LValue::Slot {
             slot: binding.slot,
             offset: 0,
             ty: binding.ty.clone(),
             root: binding.slot,
             root_name: ident.name.clone(),
+            path: ident.name.clone(),
         };
-        self.read_from_lvalue(&lvalue)
+        self.read_from_lvalue(&lvalue, true, ident.span)
     }
 
-    /// Reads a value out of an lvalue location.
+    /// Reads a value out of an lvalue location, validating initialization and
+    /// move state first (ticket PLK-010).
     // CEP:WHAT: Handles the read from lvalue step of this stage per the design and the file header contract.
     // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
     // CEP:STATUS: complete
@@ -325,7 +335,8 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    pub fn read_from_lvalue(&mut self, lvalue: &LValue) -> Lowered {
+    pub fn read_from_lvalue(&mut self, lvalue: &LValue, whole: bool, span: Span) -> Lowered {
+        self.require_lvalue_readable(lvalue, whole, span);
         match lvalue {
             LValue::Slot {
                 slot, offset, ty, ..
@@ -401,7 +412,12 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    fn aggregate_at(&mut self, base: planck_ir::Vreg, offset: u32, ty: &Ty) -> planck_ir::Vreg {
+    pub(crate) fn aggregate_at(
+        &mut self,
+        base: planck_ir::Vreg,
+        offset: u32,
+        ty: &Ty,
+    ) -> planck_ir::Vreg {
         if offset == 0 {
             return base;
         }
@@ -816,7 +832,12 @@ impl<'a> FnBuilder<'a> {
                 Some(found) => found,
                 None => continue, // already reported
             };
-            let value = self.lower_expr(value_expr, Some(&field_ty));
+            // Non-Copy fields are moved out of their source place.
+            let value = if !is_copy(&field_ty) {
+                self.consume_expr(value_expr, &field_ty)
+            } else {
+                self.lower_expr(value_expr, Some(&field_ty))
+            };
             if value.ty != field_ty {
                 self.report_mismatch(value_expr.span(), &field_ty, &value.ty);
                 continue;
@@ -945,7 +966,12 @@ impl<'a> FnBuilder<'a> {
         });
         if let (Some(payload_expr), Some(pty)) = (payload, &payload_ty) {
             let payload_offset = self.tables.enum_ty(enum_id).payload_offset;
-            let value = self.lower_expr(payload_expr, Some(pty));
+            // A non-Copy payload is moved out of its source place.
+            let value = if !is_copy(pty) {
+                self.consume_expr(payload_expr, pty)
+            } else {
+                self.lower_expr(payload_expr, Some(pty))
+            };
             if value.ty != *pty {
                 self.report_mismatch(payload_expr.span(), pty, &value.ty);
             } else {
@@ -1266,8 +1292,13 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             (Some(lvalue), expected) if !is_scalar_shaped(expected) => {
-                // By-value aggregate receiver: copy into a temporary and pass its address.
-                let value = self.read_from_lvalue(lvalue);
+                // By-value aggregate receiver: taking `self` moves the receiver
+                // into the temporary that is passed by reference.
+                let value = self.consume_lvalue(
+                    lvalue,
+                    matches!(receiver, Expr::Ident { .. }),
+                    receiver.span(),
+                );
                 let temp = self.slot(expected.clone(), "<recv_tmp>");
                 self.emit(Inst::StoreStructFromAddr {
                     dst_slot: temp,
@@ -1284,7 +1315,11 @@ impl<'a> FnBuilder<'a> {
                 addr
             }
             (Some(lvalue), expected) => {
-                let value = self.read_from_lvalue(lvalue);
+                let value = self.read_from_lvalue(
+                    lvalue,
+                    matches!(receiver, Expr::Ident { .. }),
+                    receiver.span(),
+                );
                 if value.ty != *expected {
                     self.report_mismatch(receiver.span(), expected, &value.ty);
                 }
@@ -1366,7 +1401,7 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    fn peek_expr_type(&mut self, expr: &Expr) -> Option<Ty> {
+    pub(crate) fn peek_expr_type(&mut self, expr: &Expr) -> Option<Ty> {
         match expr {
             Expr::Ident { ident } => self.lookup(&ident.name).map(|b| b.ty),
             Expr::Field { base, field, span } => {
@@ -1498,8 +1533,9 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             expected if !is_scalar_shaped(expected) => {
-                // Aggregate by value: caller copy.
-                let value = self.lower_expr(arg_expr, Some(expected));
+                // Aggregate by value: the argument is a move source, then a
+                // caller copy into the argument temporary.
+                let value = self.consume_expr(arg_expr, expected);
                 if value.ty != *expected {
                     self.report_mismatch(arg_expr.span(), expected, &value.ty);
                 }
@@ -1649,8 +1685,5 @@ fn int_range_contains(ty: &Ty, value: i128) -> bool {
     }
 }
 
-// is_copy is re-exported for future move-semantics engagement (PLK-010).
-#[allow(dead_code)]
-fn _copy_check(ty: &Ty) -> bool {
-    is_copy(ty)
-}
+// is_copy is engaged by the move checker (ticket PLK-010): every by-value use
+// of a non-Copy place is a move and is validated at the consuming site.

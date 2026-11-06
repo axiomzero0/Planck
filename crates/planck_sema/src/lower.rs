@@ -1,10 +1,10 @@
 // CEP:FILE: crates/planck_sema/src/lower.rs
-// CEP:WHAT: Single-pass type checking, mutability checking, borrow checking, and AST-to-IR lowering.
+// CEP:WHAT: Single-pass type checking, mutability checking, borrow checking, move checking, definite-assignment checking, and AST-to-IR lowering.
 // CEP:WHY: Checking and lowering share every type decision, so a single pass emits verified IR directly and cannot diverge from the checks that justify it.
 // CEP:CLASS: CEP-1
 // CEP:STATUS: complete
 // CEP:FAILURE: All user errors are reported as diagnostics with codes PLK-S00xx and lowering continues best-effort; the output is code-generated only when no errors exist. The pass itself never panics on any input tree.
-// CEP:ASSUMES: Aggregate-typed expressions evaluate to a vreg holding the aggregate's ADDRESS (address-value convention). Borrows are statement-scoped unless bound to a `let`, in which case they live to the end of the enclosing block (ticket PLK-015 tracks full NLL regions). All types are Copy in this milestone (no heap types; ticket PLK-010), so move and copy semantics coincide. `let` requires an initializer (PLK-S0020). Match requires a wildcard arm (design 2.5). Integer literals take the expected integer type or default to i32; out-of-range literals are errors.
+// CEP:ASSUMES: Aggregate-typed expressions evaluate to a vreg holding the aggregate's ADDRESS (address-value convention). Borrows are statement-scoped unless bound to a `let`, in which case they live to the end of the enclosing block (ticket PLK-015 tracks full NLL regions). Structs, enums, and arrays of non-Copy elements are non-Copy (ticket PLK-010): every by-value use is a move, tracked per binding and per field offset; moves out of references and array elements are rejected; a binding visible at loop entry may not be moved inside the loop. `let` may omit the initializer when a type annotation is present; the variable must be definitely assigned before any read or borrow (PLK-S0024). Match requires a wildcard arm (design 2.5). Integer literals take the expected integer type or default to i32; out-of-range literals are errors. Statements after a terminator inside a block are not analyzed.
 // CEP:COST: O(program size); each node visited once; scope and borrow sets are small per function. Deeply nested expressions recurse proportionally to nesting depth, which is bounded by input size.
 // CEP:EVIDENCE: cargo test -p planck_sema; end-to-end programs in crates/planckc/tests.
 // CEP:SECURITY: Source is untrusted: name lookups are total, recursion depth follows input nesting, and all index arithmetic uses saturating operations before the emitted runtime bounds checks take over.
@@ -33,6 +33,34 @@ const E_UNEXPECTED_TYPE: &str = "PLK-S0003";
 const E_BAD_OPERANDS: &str = "PLK-S0016";
 const E_NO_INIT: &str = "PLK-S0020";
 const E_UNKNOWN_NAME: &str = "PLK-S0002";
+const E_MOVED: &str = "PLK-S0023";
+const E_UNINIT: &str = "PLK-S0024";
+const E_MOVE_OUT: &str = "PLK-S0025";
+
+/// Ownership state of one binding slot, tracked flow-sensitively while lowering.
+/// `initialized` is the definite-assignment bit; `moved` and `fields_moved` are
+/// the move-checker bits (whole value and per-field partial moves).
+#[derive(Clone, Default, Debug)]
+pub(crate) struct OwnerState {
+    initialized: bool,
+    moved: bool,
+    fields_moved: std::collections::BTreeSet<u32>,
+}
+
+impl OwnerState {
+    /// State of a freshly bound, fully initialized value (parameters, initializers).
+    pub(crate) fn live() -> Self {
+        OwnerState {
+            initialized: true,
+            moved: false,
+            fields_moved: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
+/// Flow-sensitive ownership map keyed by binding slot. Slots without an entry
+/// are internal temporaries, which are always fresh and never consulted.
+pub(crate) type OwnerMap = BTreeMap<Slot, OwnerState>;
 
 /// Result of semantic analysis.
 pub struct SemaOutput {
@@ -137,6 +165,8 @@ pub enum LValue {
         ty: Ty,
         root: Slot,
         root_name: String,
+        /// Source-text-ish path for diagnostics (e.g. `p.inner`).
+        path: String,
     },
     /// An address held in a vreg (through a reference or dynamic array indexing), with a static byte offset.
     Indirect {
@@ -145,6 +175,8 @@ pub enum LValue {
         ty: Ty,
         root: Slot,
         root_name: String,
+        /// Source-text-ish path for diagnostics (e.g. `a[0].x`).
+        path: String,
     },
 }
 
@@ -158,6 +190,13 @@ impl LValue {
     pub fn root_name(&self) -> &str {
         match self {
             LValue::Slot { root_name, .. } | LValue::Indirect { root_name, .. } => root_name,
+        }
+    }
+
+    /// Full source-text path of the place, for diagnostics.
+    pub fn path(&self) -> String {
+        match self {
+            LValue::Slot { path, .. } | LValue::Indirect { path, .. } => path.clone(),
         }
     }
 
@@ -182,6 +221,8 @@ pub struct FnBuilder<'a> {
     pub(crate) scopes: Vec<BTreeMap<String, Binding>>,
     pub(crate) borrows: Vec<ActiveBorrow>,
     pub(crate) borrow_marks: Vec<usize>,
+    /// Definite-assignment and move state per binding slot (ticket PLK-010).
+    pub(crate) owners: OwnerMap,
     pub(crate) loops: Vec<LoopCtx>,
     pub(crate) cur: BlockId,
     pub(crate) dead: bool,
@@ -229,6 +270,7 @@ impl<'a> FnBuilder<'a> {
             scopes: vec![BTreeMap::new()],
             borrows: Vec::new(),
             borrow_marks: Vec::new(),
+            owners: BTreeMap::new(),
             loops: Vec::new(),
             cur: BlockId(0),
             dead: false,
@@ -413,6 +455,20 @@ impl<'a> FnBuilder<'a> {
         persistent: bool,
         span: Span,
     ) {
+        // Borrowing a not-yet-initialized binding is rejected (PLK-S0024).
+        if let Some(state) = self.owners.get(&root) {
+            if !state.initialized {
+                self.diags.push(Diag::error(
+                    E_UNINIT,
+                    span,
+                    format!(
+                        "borrow of possibly-uninitialized value `{}`; assign it first",
+                        root_name
+                    ),
+                ));
+                return;
+            }
+        }
         if mutable {
             if let Some(existing) = self
                 .borrows
@@ -459,7 +515,9 @@ impl<'a> FnBuilder<'a> {
         });
     }
 
-    /// Checks an owner access against active borrows. `write` also covers moves.
+    /// Checks an owner access against active borrows. `action` is one of
+    /// "use" (a read, allowed under shared borrows), "assign to", or "move"
+    /// (both of which conflict with every active borrow of the root).
     // CEP:WHAT: Handles the check owner use step of this stage per the design and the file header contract.
     // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
     // CEP:STATUS: complete
@@ -467,7 +525,13 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    pub(crate) fn check_owner_use(&mut self, root: Slot, root_name: &str, write: bool, span: Span) {
+    pub(crate) fn check_owner_use(
+        &mut self,
+        root: Slot,
+        root_name: &str,
+        action: &str,
+        span: Span,
+    ) {
         for borrow in &self.borrows {
             if borrow.root != root {
                 continue;
@@ -478,25 +542,359 @@ impl<'a> FnBuilder<'a> {
                     span,
                     format!(
                         "cannot {} `{}` while it is mutably borrowed by `{}`",
-                        if write { "assign to" } else { "use" },
-                        root_name,
-                        borrow.name
+                        action, root_name, borrow.name
                     ),
                 ));
                 return;
             }
-            if write {
+            if action != "use" {
                 self.diags.push(Diag::error(
                     E_BORROW,
                     span,
                     format!(
-                        "cannot assign to `{}` while it is borrowed by `{}`",
-                        root_name, borrow.name
+                        "cannot {} `{}` while it is borrowed by `{}`",
+                        action, root_name, borrow.name
                     ),
                 ));
                 return;
             }
         }
+    }
+
+    // ----- ownership discipline (ticket PLK-010) -----
+
+    /// Slot display name for diagnostics (falls back to the raw slot id).
+    // CEP:WHAT: Handles the slot display name step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn slot_display_name(&self, slot: Slot) -> String {
+        self.func
+            .slots
+            .get(slot.0 as usize)
+            .map(|info| info.origin.clone())
+            .unwrap_or_else(|| format!("<slot {}>", slot.0))
+    }
+
+    /// Validates that reading (or borrowing) the place is legal: the root must
+    /// be definitely initialized, the whole value must not be moved, and the
+    /// specific field must not be partially moved.
+    // CEP:WHAT: Handles the require lvalue readable step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub(crate) fn require_lvalue_readable(&mut self, lvalue: &LValue, whole: bool, span: Span) {
+        let root = lvalue.root();
+        let Some(state) = self.owners.get(&root) else {
+            return; // internal temporaries and deref roots are always fresh
+        };
+        if !state.initialized {
+            self.diags.push(Diag::error(
+                E_UNINIT,
+                span,
+                format!(
+                    "read of uninitialized value `{}`; every path to here must assign it first",
+                    lvalue.path()
+                ),
+            ));
+            return;
+        }
+        if state.moved {
+            self.diags.push(Diag::error(
+                E_MOVED,
+                span,
+                format!("use of moved value `{}`", lvalue.path()),
+            ));
+            return;
+        }
+        if let LValue::Slot { offset, .. } = lvalue {
+            // A whole-value read requires every field still present; a field
+            // read only requires that specific field.
+            let poisoned = if whole {
+                !state.fields_moved.is_empty()
+            } else {
+                state.fields_moved.contains(offset)
+            };
+            if poisoned {
+                self.diags.push(Diag::error(
+                    E_MOVED,
+                    span,
+                    format!("use of moved value `{}`", lvalue.path()),
+                ));
+            }
+        }
+    }
+
+    /// Validates moving out of the place and records the move. Returns false
+    /// when the move is illegal (a diagnostic has been reported).
+    // CEP:WHAT: Handles the try mark move step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub(crate) fn try_mark_move_of_lvalue(
+        &mut self,
+        lvalue: &LValue,
+        whole: bool,
+        span: Span,
+    ) -> bool {
+        let root = lvalue.root();
+        let path = lvalue.path();
+        if matches!(lvalue, LValue::Indirect { .. }) {
+            self.diags.push(Diag::error(
+                E_MOVE_OUT,
+                span,
+                format!(
+                    "cannot move out of `{}`: only values owned by a local binding can be moved",
+                    path
+                ),
+            ));
+            return false;
+        }
+        let Some(state) = self.owners.get(&root) else {
+            return true; // internal temporaries: nothing to track
+        };
+        if !state.initialized {
+            self.diags.push(Diag::error(
+                E_UNINIT,
+                span,
+                format!("move of uninitialized value `{}`", path),
+            ));
+            return false;
+        }
+        // A whole move needs the value untouched; a partial move needs the
+        // specific field still present. Either way a whole move poisons the rest.
+        let (whole_moved, field_moved) = match lvalue {
+            LValue::Slot { offset, .. } => (
+                state.moved,
+                if whole {
+                    !state.fields_moved.is_empty()
+                } else {
+                    state.fields_moved.contains(offset)
+                },
+            ),
+            LValue::Indirect { .. } => unreachable!("rejected above"),
+        };
+        if whole_moved || field_moved {
+            self.diags.push(Diag::error(
+                E_MOVED,
+                span,
+                format!("use of moved value `{}`", path),
+            ));
+            return false;
+        }
+        // Moving conflicts with every active borrow of the root.
+        self.check_owner_use(root, &path, "move", span);
+        let state = self.owners.get_mut(&root).expect("state checked above");
+        match lvalue {
+            LValue::Slot { offset, .. } => {
+                if whole {
+                    state.moved = true;
+                } else {
+                    state.fields_moved.insert(*offset);
+                }
+            }
+            LValue::Indirect { .. } => unreachable!("rejected above"),
+        }
+        true
+    }
+
+    /// Consumes an owned place as a move source: validates and marks the move,
+    /// then yields the value (address-valued for aggregates).
+    // CEP:WHAT: Handles the consume lvalue step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub(crate) fn consume_lvalue(&mut self, lvalue: &LValue, whole: bool, span: Span) -> Lowered {
+        match lvalue {
+            LValue::Slot {
+                slot, offset, ty, ..
+            } => {
+                self.try_mark_move_of_lvalue(lvalue, whole, span);
+                let addr = self.vreg(Ty::Ref(Box::new(ty.clone()), false));
+                self.emit(Inst::AddrSlot {
+                    dst: addr,
+                    slot: *slot,
+                    pointee: ty.clone(),
+                    mutable: false,
+                });
+                let value = self.aggregate_at(addr, *offset, ty);
+                Lowered {
+                    vreg: value,
+                    ty: ty.clone(),
+                }
+            }
+            LValue::Indirect { .. } => {
+                self.try_mark_move_of_lvalue(lvalue, whole, span);
+                self.read_from_lvalue(lvalue, whole, span)
+            }
+        }
+    }
+
+    /// Lowers `expr` in a by-value context for type `expect`. Copy types read
+    /// normally; non-Copy types move out of the source place. Fresh values
+    /// (constructors, calls, literals) lower unchanged.
+    // CEP:WHAT: Handles the consume expr step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub(crate) fn consume_expr(&mut self, expr: &Expr, expect: &Ty) -> Lowered {
+        if crate::types::is_copy(expect) {
+            return self.lower_expr(expr, Some(expect));
+        }
+        match expr {
+            Expr::Ident { .. } | Expr::Field { .. } => match self.resolve_lvalue(expr) {
+                Some(lvalue) => {
+                    let whole = matches!(expr, Expr::Ident { .. });
+                    self.consume_lvalue(&lvalue, whole, expr.span())
+                }
+                None => Lowered {
+                    vreg: self.vreg(expect.clone()),
+                    ty: expect.clone(),
+                },
+            },
+            // Moving out of a dereference or an array element would leave the
+            // original owner intact: rejected by design Part 1.
+            Expr::Deref { .. } | Expr::Index { .. } => {
+                let path = self.describe_place(expr);
+                self.diags.push(Diag::error(
+                    E_MOVE_OUT,
+                    expr.span(),
+                    format!(
+                        "cannot move out of `{}`: only values owned by a local binding can be moved",
+                        path
+                    ),
+                ));
+                self.lower_expr(expr, Some(expect))
+            }
+            _ => self.lower_expr(expr, Some(expect)),
+        }
+    }
+
+    /// Best-effort source-text description of a place for diagnostics.
+    // CEP:WHAT: Handles the describe place step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn describe_place(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Ident { ident } => ident.name.clone(),
+            Expr::Field { base, field, .. } => {
+                format!("{}.{}", self.describe_place(base), field.name)
+            }
+            Expr::Index { base, .. } => format!("{}[..]", self.describe_place(base)),
+            Expr::Deref { expr: inner, .. } => format!("*{}", self.describe_place(inner)),
+            other => other.span().to_string(),
+        }
+    }
+
+    /// Reports bindings that were moved (wholly or partially) inside a loop
+    /// body while they were live at loop entry. The v0.1 rule is conservative:
+    /// such moves are rejected because every iteration after the first would
+    /// observe a moved value.
+    // CEP:WHAT: Handles the report loop moves step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn report_loop_moves(&mut self, entry: &OwnerMap, span: Span) {
+        for (slot, entry_state) in entry {
+            if !entry_state.initialized {
+                continue;
+            }
+            let Some(post) = self.owners.get(slot) else {
+                continue;
+            };
+            let new_whole_move = post.moved && !entry_state.moved;
+            let new_field_move = post
+                .fields_moved
+                .iter()
+                .any(|offset| !entry_state.fields_moved.contains(offset));
+            if new_whole_move || new_field_move {
+                let name = self.slot_display_name(*slot);
+                self.diags.push(Diag::error(
+                    E_MOVED,
+                    span,
+                    format!(
+                        "`{}` may be moved while the loop runs; reassign it inside the loop instead of moving it",
+                        name
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Merges branch outcome states at a control-flow join. Initialization
+    /// intersects (must hold on every live path); moved flags union (a value
+    /// moved on any live path is treated as moved). Diverged branches
+    /// (terminated by return/break/continue) are excluded.
+    // CEP:WHAT: Handles the merge outcomes step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn merge_outcomes(&mut self, outcomes: &[(OwnerMap, bool)]) -> OwnerMap {
+        let live: Vec<&OwnerMap> = outcomes
+            .iter()
+            .filter(|(_, diverged)| !diverged)
+            .map(|(state, _)| state)
+            .collect();
+        if live.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut slots: std::collections::BTreeSet<Slot> = std::collections::BTreeSet::new();
+        for state in &live {
+            slots.extend(state.keys().copied());
+        }
+        let mut merged = OwnerMap::new();
+        for slot in slots {
+            let mut initialized = true;
+            let mut moved = false;
+            let mut fields = std::collections::BTreeSet::new();
+            let mut present_everywhere = true;
+            for state in &live {
+                match state.get(&slot) {
+                    Some(one) => {
+                        initialized &= one.initialized;
+                        moved |= one.moved;
+                        fields.extend(one.fields_moved.iter().copied());
+                    }
+                    None => present_everywhere = false,
+                }
+            }
+            if present_everywhere {
+                merged.insert(
+                    slot,
+                    OwnerState {
+                        initialized,
+                        moved,
+                        fields_moved: fields,
+                    },
+                );
+            }
+        }
+        merged
     }
 
     // ----- type helpers -----
@@ -564,6 +962,7 @@ impl<'a> FnBuilder<'a> {
                     let slot = self.slot(receiver_ty.clone(), "self");
                     // The receiver is the first ABI parameter (after any sret).
                     self.func.params.push(slot);
+                    self.owners.insert(slot, OwnerState::live());
                     self.scopes[0].insert(
                         "self".to_string(),
                         Binding {
@@ -579,6 +978,7 @@ impl<'a> FnBuilder<'a> {
             let ty = sig.params.get(sig_idx).cloned().unwrap_or(Ty::Unit);
             sig_idx += 1;
             let slot = self.slot(ty.clone(), &param.name.name);
+            self.owners.insert(slot, OwnerState::live());
             self.scopes[0].insert(
                 param.name.name.clone(),
                 Binding {
@@ -593,6 +993,7 @@ impl<'a> FnBuilder<'a> {
             if let Some(receiver_ty) = sig.params.first().cloned() {
                 let slot = self.slot(receiver_ty.clone(), "self");
                 self.func.params.push(slot);
+                self.owners.insert(slot, OwnerState::live());
                 self.scopes[0].insert(
                     "self".to_string(),
                     Binding {
@@ -783,16 +1184,16 @@ impl<'a> FnBuilder<'a> {
                 self.clear_temp_borrows();
             }
             Stmt::If { arms, fallback, .. } => self.lower_if(arms, fallback.as_ref()),
-            Stmt::While { cond, body, .. } => self.lower_while(cond, body),
-            Stmt::Loop { body, .. } => self.lower_loop(body),
+            Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
+            Stmt::Loop { body, span } => self.lower_loop(body, *span),
             Stmt::For {
                 var,
                 start,
                 end,
                 inclusive,
                 body,
-                ..
-            } => self.lower_for(var, start, end, *inclusive, body),
+                span,
+            } => self.lower_for(var, start, end, *inclusive, body, *span),
             Stmt::Return { value, span } => self.lower_return(value.as_ref(), *span),
             Stmt::Break { span } => self.lower_break(*span),
             Stmt::Continue { span } => self.lower_continue(*span),
@@ -827,37 +1228,49 @@ impl<'a> FnBuilder<'a> {
         span: Span,
     ) {
         let declared = ty.and_then(|t| self.tables.resolve(t, self.diags));
-        let init_expr = match init {
-            Some(expr) => expr,
-            None => {
-                self.diags.push(Diag::error(
-                    E_NO_INIT,
-                    span,
-                    "`let` requires an initializer in this milestone (ticket PLK-010 covers deferred initialization)".to_string(),
-                ));
-                // Bind a unit fallback value so later code can still resolve the name.
-                let slot = self.slot(Ty::Unit, &name.name);
-                self.scopes
-                    .last_mut()
-                    .expect("scope stack never empty")
-                    .insert(
-                        name.name.clone(),
-                        Binding {
-                            slot,
-                            ty: Ty::Unit,
-                            mutable,
-                        },
-                    );
-                return;
-            }
+        let Some(init_expr) = init else {
+            // Deferred initialization (ticket PLK-010): storage exists from here,
+            // but every read and borrow requires a prior definite assignment.
+            let ty = match declared {
+                Some(ty) => ty,
+                None => {
+                    self.diags.push(Diag::error(
+                        E_NO_INIT,
+                        span,
+                        "`let` without an initializer requires a type annotation".to_string(),
+                    ));
+                    Ty::Unit
+                }
+            };
+            let slot = self.slot(ty.clone(), &name.name);
+            self.owners.insert(
+                slot,
+                OwnerState {
+                    initialized: false,
+                    ..OwnerState::default()
+                },
+            );
+            self.scopes
+                .last_mut()
+                .expect("scope stack never empty")
+                .insert(name.name.clone(), Binding { slot, ty, mutable });
+            return;
         };
-        let lowered = self.lower_expr(init_expr, declared.as_ref());
+        // The expected type decides whether the initializer is a move source.
+        let expected = declared.clone().or_else(|| self.peek_expr_type(init_expr));
+        let lowered = match &expected {
+            Some(expected_ty) if !crate::types::is_copy(expected_ty) => {
+                self.consume_expr(init_expr, expected_ty)
+            }
+            _ => self.lower_expr(init_expr, declared.as_ref()),
+        };
         let ty = declared.unwrap_or(lowered.ty.clone());
         if lowered.ty != ty {
             self.report_mismatch(init_expr.span(), &ty, &lowered.ty);
         }
         let slot = self.slot(ty.clone(), &name.name);
         self.store_into_slot(slot, &ty, &lowered, init_expr.span());
+        self.owners.insert(slot, OwnerState::live());
         // A let-bound borrow is persistent until the enclosing scope ends.
         if let Expr::Borrow {
             mutable: borrow_mut,
@@ -923,26 +1336,69 @@ impl<'a> FnBuilder<'a> {
             Some(lvalue) => lvalue,
             None => return,
         };
-        // Mutability and borrow checks on the root. Writes through a reference
-        // (LValue::Indirect) are governed by the reference's own mutability, checked
-        // below; the owner-binding check applies only to direct slot writes.
         let root = lvalue.root();
         let root_name = lvalue.root_name().to_string();
-        if matches!(lvalue, LValue::Slot { .. }) {
-            let root_mutable = self
-                .lookup(&root_name)
-                .map(|binding| binding.mutable)
-                .unwrap_or(false);
-            if !root_mutable {
-                self.diags.push(Diag::error(
-                    E_NOT_MUTABLE,
-                    span,
-                    format!("cannot assign to `{}`: not declared as mutable", root_name),
-                ));
-                return;
+        // Mutability and ownership validation of the target, captured before the
+        // right-hand side lowers (the RHS may legally move the target itself,
+        // as in `x = f(x)`).
+        let pre_state = self.owners.get(&root).cloned();
+        let whole_target_pre = matches!(target, Expr::Ident { .. });
+        match &lvalue {
+            LValue::Slot { .. } => {
+                let root_mutable = self
+                    .lookup(&root_name)
+                    .map(|binding| binding.mutable)
+                    .unwrap_or(false);
+                if whole_target_pre {
+                    // First assignment to a deferred `let` is initialization, not
+                    // mutation, and is allowed without `mut` (Rust-style rule).
+                    let initialized = pre_state.as_ref().map(|s| s.initialized).unwrap_or(true);
+                    if initialized && !root_mutable {
+                        self.diags.push(Diag::error(
+                            E_NOT_MUTABLE,
+                            span,
+                            format!("cannot assign to `{}`: not declared as mutable", root_name),
+                        ));
+                        return;
+                    }
+                } else {
+                    // Field writes always require `mut`; the value must be alive
+                    // and initialized as a whole (no partial initialization).
+                    if !root_mutable {
+                        self.diags.push(Diag::error(
+                            E_NOT_MUTABLE,
+                            span,
+                            format!("cannot assign to `{}`: not declared as mutable", root_name),
+                        ));
+                        return;
+                    }
+                    match &pre_state {
+                        Some(state) if !state.initialized => {
+                            self.diags.push(Diag::error(
+                                E_UNINIT,
+                                span,
+                                format!(
+                                    "cannot assign to a field of `{}`: the value is not initialized; assign the whole value first",
+                                    root_name
+                                ),
+                            ));
+                            return;
+                        }
+                        Some(state) if state.moved => {
+                            self.diags.push(Diag::error(
+                                E_MOVED,
+                                span,
+                                format!("use of moved value `{}`", lvalue.path()),
+                            ));
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
             }
+            LValue::Indirect { .. } => {}
         }
-        self.check_owner_use(root, &root_name, true, span);
+        self.check_owner_use(root, &root_name, "assign to", span);
         let target_ty = lvalue.ty().clone();
         // Through an immutable reference, writes are banned.
         if let LValue::Indirect { addr, .. } = &lvalue {
@@ -958,17 +1414,25 @@ impl<'a> FnBuilder<'a> {
                 }
             }
         }
-        let lowered = self.lower_expr(value, Some(&target_ty));
+        // A non-Copy right-hand side that names a place moves out of it.
+        let lowered = if !crate::types::is_copy(&target_ty) {
+            self.consume_expr(value, &target_ty)
+        } else {
+            self.lower_expr(value, Some(&target_ty))
+        };
         if lowered.ty != target_ty {
             self.report_mismatch(value.span(), &target_ty, &lowered.ty);
             return;
         }
+        let whole_target = matches!(target, Expr::Ident { .. });
         match lvalue {
             LValue::Slot {
                 slot, offset, ty, ..
             } => {
-                if offset == 0 {
+                if whole_target {
                     self.store_into_slot(slot, &ty, &lowered, span);
+                    // Whole assignment (re)initializes the binding and clears moves.
+                    self.owners.insert(slot, OwnerState::live());
                 } else {
                     match &ty {
                         Ty::Struct(_) | Ty::Enum(_) => {
@@ -986,6 +1450,10 @@ impl<'a> FnBuilder<'a> {
                                 ty,
                             });
                         }
+                    }
+                    // Reassigning a field cancels its partial move.
+                    if let Some(state) = self.owners.get_mut(&slot) {
+                        state.fields_moved.remove(&offset);
                     }
                 }
             }
@@ -1046,8 +1514,8 @@ impl<'a> FnBuilder<'a> {
                         value: Some(lowered.vreg),
                     });
                 } else {
-                    // Aggregate return: copy the value into the sret slot, then return unit.
-                    let lowered = self.lower_expr(expr, Some(expected));
+                    // Aggregate return: the value is moved into the sret slot.
+                    let lowered = self.consume_expr(expr, expected);
                     if lowered.ty != *expected {
                         self.report_mismatch(expr.span(), expected, &lowered.ty);
                         return;
@@ -1074,6 +1542,9 @@ impl<'a> FnBuilder<'a> {
                 self.terminate_and_start(Term::Ret { value: None });
             }
         }
+        // Every return path terminates the block: subsequent statements in this
+        // block are unreachable and are not analyzed.
+        self.dead = true;
     }
 
     // CEP:WHAT: Handles the lower break step of this stage per the design and the file header contract.
@@ -1087,6 +1558,7 @@ impl<'a> FnBuilder<'a> {
         match self.loops.last().map(|ctx| ctx.break_target) {
             Some(target) => {
                 self.terminate_and_start(Term::Br(target));
+                self.dead = true;
             }
             None => {
                 self.diags.push(Diag::error(
@@ -1109,6 +1581,7 @@ impl<'a> FnBuilder<'a> {
         match self.loops.last().map(|ctx| ctx.continue_target) {
             Some(target) => {
                 self.terminate_and_start(Term::Br(target));
+                self.dead = true;
             }
             None => {
                 self.diags.push(Diag::error(
@@ -1128,8 +1601,14 @@ impl<'a> FnBuilder<'a> {
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
     pub(crate) fn lower_if(&mut self, arms: &[(Expr, AstBlock)], fallback: Option<&AstBlock>) {
+        // Every arm starts from the same entry state (conditions cannot move or
+        // initialize anything), so their outcomes can be merged at the join.
+        let entry = self.owners.clone();
         let mut end_blocks: Vec<BlockId> = Vec::new();
+        let mut outcomes: Vec<(OwnerMap, bool)> = Vec::new();
         for (index, (cond, body)) in arms.iter().enumerate() {
+            self.owners = entry.clone();
+            self.dead = false;
             let cond_value = self.lower_expr(cond, Some(&Ty::Bool));
             if cond_value.ty != Ty::Bool {
                 self.diags.push(Diag::error(
@@ -1150,19 +1629,27 @@ impl<'a> FnBuilder<'a> {
             // block whose extra join edge is pruned by reachability.
             self.cur = then_blk;
             self.lower_block(body);
+            outcomes.push((self.owners.clone(), self.dead));
             end_blocks.push(self.cur);
             // Chain the next condition (or the fallback) from next_blk.
             self.cur = next_blk;
             let is_last = index + 1 == arms.len();
             if is_last {
                 if let Some(fallback_body) = fallback {
+                    self.owners = entry.clone();
+                    self.dead = false;
                     self.lower_block(fallback_body);
+                    outcomes.push((self.owners.clone(), self.dead));
                     end_blocks.push(self.cur);
                 } else {
+                    // Without a fallback the no-arm path continues with the entry state.
+                    outcomes.push((entry.clone(), false));
                     end_blocks.push(self.cur);
                 }
             }
         }
+        self.owners = self.merge_outcomes(&outcomes);
+        self.dead = outcomes.iter().all(|(_, diverged)| *diverged);
         // Join: every registered arm-end block branches here; blocks that already
         // terminated keep their real terminator.
         let join = self.block();
@@ -1172,6 +1659,12 @@ impl<'a> FnBuilder<'a> {
             }
         }
         self.cur = join;
+        if self.dead {
+            // All paths diverged: the join is unreachable. terminate_and_start
+            // would refuse to emit into it; leave `cur` on the empty join block
+            // and mark dead so following statements are skipped.
+            self.dead = true;
+        }
     }
 
     // CEP:WHAT: Handles the lower while step of this stage per the design and the file header contract.
@@ -1181,7 +1674,7 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    pub(crate) fn lower_while(&mut self, cond: &Expr, body: &AstBlock) {
+    pub(crate) fn lower_while(&mut self, cond: &Expr, body: &AstBlock, span: Span) {
         let header = self.block();
         self.terminate_and_start(Term::Br(header));
         self.cur = header;
@@ -1201,6 +1694,11 @@ impl<'a> FnBuilder<'a> {
             else_blk: exit_blk,
         });
         self.clear_temp_borrows();
+        // The body may run any number of times, from zero up: ownership state
+        // after the loop is the entry state, and moves inside the body of a
+        // value live at entry are rejected.
+        let entry_owners = self.owners.clone();
+        self.dead = false;
         self.cur = body_blk;
         self.loops.push(LoopCtx {
             break_target: exit_blk,
@@ -1208,7 +1706,12 @@ impl<'a> FnBuilder<'a> {
         });
         self.lower_block(body);
         self.loops.pop();
+        self.report_loop_moves(&entry_owners, span);
+        for (slot, state) in &entry_owners {
+            self.owners.insert(*slot, state.clone());
+        }
         self.terminate_and_start(Term::Br(header));
+        self.dead = false;
         self.cur = exit_blk;
     }
 
@@ -1219,18 +1722,25 @@ impl<'a> FnBuilder<'a> {
     // CEP:ASSUMES: See the file header for the stage-wide assumptions.
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
-    pub(crate) fn lower_loop(&mut self, body: &AstBlock) {
+    pub(crate) fn lower_loop(&mut self, body: &AstBlock, span: Span) {
         let header = self.block();
         self.terminate_and_start(Term::Br(header));
         self.cur = header;
         let exit_blk = self.block();
+        let entry_owners = self.owners.clone();
+        self.dead = false;
         self.loops.push(LoopCtx {
             break_target: exit_blk,
             continue_target: header,
         });
         self.lower_block(body);
         self.loops.pop();
+        self.report_loop_moves(&entry_owners, span);
+        for (slot, state) in &entry_owners {
+            self.owners.insert(*slot, state.clone());
+        }
         self.terminate_and_start(Term::Br(header));
+        self.dead = false;
         self.cur = exit_blk;
     }
 
@@ -1248,6 +1758,7 @@ impl<'a> FnBuilder<'a> {
         end: &Expr,
         inclusive: bool,
         body: &AstBlock,
+        span: Span,
     ) {
         let start_value = self.lower_expr(start, None);
         if !start_value.ty.is_integer() {
@@ -1314,6 +1825,7 @@ impl<'a> FnBuilder<'a> {
         self.cur = body_blk;
         self.scopes.push(BTreeMap::new());
         self.borrow_marks.push(self.borrows.len());
+        self.owners.insert(iter_slot, OwnerState::live());
         self.scopes
             .last_mut()
             .expect("scope stack never empty")
@@ -1330,8 +1842,16 @@ impl<'a> FnBuilder<'a> {
             break_target: exit_blk,
             continue_target,
         });
+        // The body may run any number of times: ownership state after the loop
+        // is the entry state, and moves of values live at entry are rejected.
+        let entry_owners = self.owners.clone();
+        self.dead = false;
         self.lower_block(body);
-        let _ = self.loops.pop();
+        self.loops.pop();
+        self.report_loop_moves(&entry_owners, span);
+        for (slot, state) in &entry_owners {
+            self.owners.insert(*slot, state.clone());
+        }
         self.end_scope();
         self.terminate_and_start(Term::Br(continue_target));
         // The increment block: i += 1 (wrapping increment; the checked increment would trap on u64::MAX).
@@ -1380,10 +1900,56 @@ impl<'a> FnBuilder<'a> {
         arms: &[planck_parser::MatchArm],
         span: Span,
     ) {
+        // A place scrutinee of non-Copy type is consumed by the match (design
+        // Part 1: matching moves the scrutinee into the arms). Computed
+        // scrutinees are fresh values and are not moves.
+        let peeked = self.peek_expr_type(scrutinee);
+        if matches!(scrutinee, Expr::Ident { .. } | Expr::Field { .. }) {
+            if let Some(Ty::Enum(enum_id)) = &peeked {
+                let enum_id = EnumId(enum_id.0);
+                let lvalue = match self.resolve_lvalue(scrutinee) {
+                    Some(lvalue) => lvalue,
+                    None => return,
+                };
+                let whole = matches!(scrutinee, Expr::Ident { .. });
+                let slot = match &lvalue {
+                    LValue::Slot { slot, .. } => {
+                        self.try_mark_move_of_lvalue(&lvalue, whole, scrutinee.span());
+                        *slot
+                    }
+                    LValue::Indirect { .. } => {
+                        self.diags.push(Diag::error(
+                            E_MOVE_OUT,
+                            scrutinee.span(),
+                            format!(
+                                "cannot move out of `{}`: only values owned by a local binding can be moved",
+                                lvalue.path()
+                            ),
+                        ));
+                        let value = self.read_from_lvalue(&lvalue, false, scrutinee.span());
+                        let tmp = self.slot(value.ty.clone(), "<match_tmp>");
+                        self.store_into_slot(tmp, &value.ty, &value, scrutinee.span());
+                        tmp
+                    }
+                };
+                self.lower_enum_match_from_slot(enum_id, slot, arms, span);
+                return;
+            }
+        }
         let scrutinee_value = self.lower_expr(scrutinee, None);
         let scrutinee_ty = scrutinee_value.ty.clone();
         match &scrutinee_ty {
             Ty::Enum(enum_id) => {
+                if matches!(scrutinee, Expr::Index { .. } | Expr::Deref { .. }) {
+                    self.diags.push(Diag::error(
+                        E_MOVE_OUT,
+                        scrutinee.span(),
+                        format!(
+                            "cannot move out of `{}`: only values owned by a local binding can be moved",
+                            self.describe_place(scrutinee)
+                        ),
+                    ));
+                }
                 self.lower_enum_match(scrutinee, scrutinee_value, *enum_id, arms, span)
             }
             ty if ty.is_integer() => self.lower_int_match(scrutinee_value, arms, span),
@@ -1435,6 +2001,23 @@ impl<'a> FnBuilder<'a> {
         span: Span,
     ) {
         let slot = self.match_scrutinee_slot(scrutinee, &scrutinee_value);
+        self.lower_enum_match_from_slot(enum_id, slot, arms, span);
+    }
+
+    // CEP:WHAT: Handles the lower enum match from slot step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    pub(crate) fn lower_enum_match_from_slot(
+        &mut self,
+        enum_id: EnumId,
+        slot: Slot,
+        arms: &[planck_parser::MatchArm],
+        span: Span,
+    ) {
         let enum_info = self.tables.enum_ty(enum_id);
         let payload_offset = enum_info.payload_offset;
         let tag = self.vreg(Ty::U32);
@@ -1447,11 +2030,17 @@ impl<'a> FnBuilder<'a> {
 
         let exit = self.block();
         let mut has_wildcard = false;
+        let mut outcomes: Vec<(OwnerMap, bool)> = Vec::new();
+        // Every arm starts from the post-scrutinee-move state.
+        let entry_owners = self.owners.clone();
         for arm in arms {
             match &arm.pattern {
                 Pattern::Wildcard(_) => {
                     has_wildcard = true;
+                    self.owners = entry_owners.clone();
+                    self.dead = false;
                     self.lower_match_body(&arm.body, None, None, exit);
+                    outcomes.push((self.owners.clone(), self.dead));
                 }
                 Pattern::Int(value, pat_span) => {
                     self.diags.push(Diag::error(
@@ -1526,11 +2115,14 @@ impl<'a> FnBuilder<'a> {
                         then_blk: arm_blk,
                         else_blk: next,
                     });
+                    self.owners = entry_owners.clone();
+                    self.dead = false;
                     self.cur = arm_blk;
                     let payload = payload_ty
                         .as_ref()
-                        .map(|ty| (ty.clone(), slot, payload_offset));
+                        .map(|ty| (Ty::Enum(enum_id), ty.clone(), slot, payload_offset));
                     self.lower_match_body(&arm.body, binding.as_ref(), payload.as_ref(), exit);
+                    outcomes.push((self.owners.clone(), self.dead));
                     self.cur = next;
                 }
             }
@@ -1541,6 +2133,17 @@ impl<'a> FnBuilder<'a> {
                 span,
                 "match is not exhaustive: a `_` arm is required in this milestone".to_string(),
             ));
+        }
+        // With a wildcard arm the no-match fallthrough is unreachable; without
+        // one (an already-reported error) the entry state flows through.
+        if has_wildcard {
+            self.owners = self.merge_outcomes(&outcomes);
+            self.dead = outcomes.iter().all(|(_, diverged)| *diverged);
+        } else {
+            let mut with_fallthrough = outcomes;
+            with_fallthrough.push((entry_owners.clone(), false));
+            self.owners = self.merge_outcomes(&with_fallthrough);
+            self.dead = false;
         }
         // Fallthrough when no arm matched (only possible when wildcard is missing or not last).
         self.terminate_and_start(Term::Br(exit));
@@ -1558,26 +2161,49 @@ impl<'a> FnBuilder<'a> {
         &mut self,
         body: &planck_parser::MatchBody,
         binding: Option<&planck_parser::Ident>,
-        payload: Option<&(Ty, Slot, u32)>,
+        payload: Option<&(Ty, Ty, Slot, u32)>,
         exit: BlockId,
     ) {
         self.scopes.push(BTreeMap::new());
         self.borrow_marks.push(self.borrows.len());
-        if let (Some(binding_name), Some((payload_ty, slot, payload_offset))) = (binding, payload) {
-            let (payload_ty, slot, payload_offset) = (payload_ty.clone(), *slot, *payload_offset);
-            let payload_value = self.vreg(payload_ty.clone());
-            self.emit(Inst::LoadField {
-                dst: payload_value,
-                slot,
-                offset: payload_offset,
-                ty: payload_ty.clone(),
-            });
+        if let (Some(binding_name), Some((enum_ty, payload_ty, slot, payload_offset))) =
+            (binding, payload)
+        {
+            let (enum_ty, payload_ty, slot, payload_offset) =
+                (enum_ty.clone(), payload_ty.clone(), *slot, *payload_offset);
             let bind_slot = self.slot(payload_ty.clone(), &binding_name.name);
-            self.emit(Inst::StoreSlot {
-                slot: bind_slot,
-                src: payload_value,
-                ty: payload_ty.clone(),
-            });
+            if is_scalar_shaped(&payload_ty) {
+                let payload_value = self.vreg(payload_ty.clone());
+                self.emit(Inst::LoadField {
+                    dst: payload_value,
+                    slot,
+                    offset: payload_offset,
+                    ty: payload_ty.clone(),
+                });
+                self.emit(Inst::StoreSlot {
+                    slot: bind_slot,
+                    src: payload_value,
+                    ty: payload_ty.clone(),
+                });
+            } else {
+                // Aggregate payloads travel as addresses: memcpy the payload
+                // bytes out of the (moved) scrutinee slot into the binding.
+                let base = self.vreg(Ty::Ref(Box::new(enum_ty.clone()), false));
+                self.emit(Inst::AddrSlot {
+                    dst: base,
+                    slot,
+                    pointee: enum_ty.clone(),
+                    mutable: false,
+                });
+                let src = self.aggregate_at(base, payload_offset, &payload_ty);
+                self.emit(Inst::StoreStructFromAddr {
+                    dst_slot: bind_slot,
+                    src_addr: src,
+                    ty: payload_ty.clone(),
+                });
+            }
+            // The payload binding owns a copy taken out of the moved scrutinee.
+            self.owners.insert(bind_slot, OwnerState::live());
             self.scopes
                 .last_mut()
                 .expect("scope stack never empty")
@@ -1603,7 +2229,12 @@ impl<'a> FnBuilder<'a> {
                     self.terminate_and_start(Term::Br(exit));
                 } else {
                     let ret_ty = self.func.ret.clone();
-                    let value = self.lower_expr(expr, Some(&ret_ty));
+                    // Non-Copy arm values move out of their source place.
+                    let value = if !is_scalar_shaped(&ret_ty) {
+                        self.consume_expr(expr, &ret_ty)
+                    } else {
+                        self.lower_expr(expr, Some(&ret_ty))
+                    };
                     if value.ty != ret_ty {
                         self.report_mismatch(expr.span(), &ret_ty, &value.ty);
                     }
@@ -1651,11 +2282,18 @@ impl<'a> FnBuilder<'a> {
         let slot = self.match_scrutinee_slot_from_value(&scrutinee_value, &ty);
         let exit = self.block();
         let mut has_wildcard = false;
+        let mut outcomes: Vec<(OwnerMap, bool)> = Vec::new();
+        // Every arm starts from the pre-match state (integer scrutinees are Copy
+        // and are not consumed by the match).
+        let entry_owners = self.owners.clone();
         for arm in arms {
             match &arm.pattern {
                 Pattern::Wildcard(_) => {
                     has_wildcard = true;
+                    self.owners = entry_owners.clone();
+                    self.dead = false;
                     self.lower_match_body_simple(&arm.body, None, exit);
+                    outcomes.push((self.owners.clone(), self.dead));
                 }
                 Pattern::Int(value, _pat_span) => {
                     let scrut = self.vreg(ty.clone());
@@ -1685,8 +2323,11 @@ impl<'a> FnBuilder<'a> {
                         then_blk: arm_blk,
                         else_blk: next,
                     });
+                    self.owners = entry_owners.clone();
+                    self.dead = false;
                     self.cur = arm_blk;
                     self.lower_match_body_simple(&arm.body, None, exit);
+                    outcomes.push((self.owners.clone(), self.dead));
                     self.cur = next;
                 }
                 Pattern::Variant { enum_name, .. } => {
@@ -1704,6 +2345,15 @@ impl<'a> FnBuilder<'a> {
                 span,
                 "match is not exhaustive: a `_` arm is required in this milestone".to_string(),
             ));
+        }
+        if has_wildcard {
+            self.owners = self.merge_outcomes(&outcomes);
+            self.dead = outcomes.iter().all(|(_, diverged)| *diverged);
+        } else {
+            let mut with_fallthrough = outcomes;
+            with_fallthrough.push((entry_owners.clone(), false));
+            self.owners = self.merge_outcomes(&with_fallthrough);
+            self.dead = false;
         }
         self.terminate_and_start(Term::Br(exit));
         self.cur = exit;
@@ -1750,7 +2400,12 @@ impl<'a> FnBuilder<'a> {
                     self.terminate_and_start(Term::Br(exit));
                 } else {
                     let ret_ty = self.func.ret.clone();
-                    let value = self.lower_expr(expr, Some(&ret_ty));
+                    // Non-Copy arm values move out of their source place.
+                    let value = if !is_scalar_shaped(&ret_ty) {
+                        self.consume_expr(expr, &ret_ty)
+                    } else {
+                        self.lower_expr(expr, Some(&ret_ty))
+                    };
                     if value.ty != ret_ty {
                         self.report_mismatch(expr.span(), &ret_ty, &value.ty);
                     }
@@ -1810,6 +2465,7 @@ impl<'a> FnBuilder<'a> {
                     ty: binding.ty,
                     root: binding.slot,
                     root_name: ident.name.clone(),
+                    path: ident.name.clone(),
                 })
             }
             Expr::Field { base, field, span } => {
@@ -1828,12 +2484,14 @@ impl<'a> FnBuilder<'a> {
                         _ => unreachable!("checked above"),
                     };
                     let _ = ref_mutable;
+                    let inner_path = base_lvalue.path();
                     base_lvalue = LValue::Indirect {
                         addr,
                         offset: 0,
                         ty: pointee,
                         root,
                         root_name,
+                        path: format!("*{}", inner_path),
                     };
                 }
                 let base_ty = base_lvalue.ty().clone();
@@ -1867,6 +2525,7 @@ impl<'a> FnBuilder<'a> {
                         return None;
                     }
                 };
+                let base_path = base_lvalue.path();
                 Some(match base_lvalue {
                     LValue::Slot {
                         slot,
@@ -1880,6 +2539,7 @@ impl<'a> FnBuilder<'a> {
                         ty: field_ty,
                         root,
                         root_name,
+                        path: format!("{}.{}", base_path, field.name),
                     },
                     LValue::Indirect {
                         addr,
@@ -1893,6 +2553,7 @@ impl<'a> FnBuilder<'a> {
                         ty: field_ty,
                         root,
                         root_name,
+                        path: format!("{}.{}", base_path, field.name),
                     },
                 })
             }
@@ -1981,6 +2642,7 @@ impl<'a> FnBuilder<'a> {
                 });
                 let root = base_lvalue.root();
                 let root_name = base_lvalue.root_name().to_string();
+                let base_path = base_lvalue.path();
                 let addr = match &base_lvalue {
                     LValue::Slot { slot, .. } => {
                         let base_addr = self.vreg(Ty::Ref(Box::new(base_ty.clone()), false));
@@ -2018,6 +2680,7 @@ impl<'a> FnBuilder<'a> {
                     ty: elem_ty,
                     root,
                     root_name,
+                    path: format!("{}[..]", base_path),
                 })
             }
             Expr::Deref { expr, span } => {
@@ -2043,6 +2706,7 @@ impl<'a> FnBuilder<'a> {
                     ty: deref_ty,
                     root: root.unwrap_or(Slot(u32::MAX)),
                     root_name: "<deref>".to_string(),
+                    path: "<deref>".to_string(),
                 })
             }
             other => {

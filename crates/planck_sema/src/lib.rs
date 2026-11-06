@@ -311,4 +311,412 @@ mod tests {
         let diags = lower_err("struct A { b: A } fn main() -> i32 { return 0; }");
         assert!(diags.iter().any(|d| d.code == "PLK-S0019"));
     }
+
+    // ----- ownership: move checking (ticket PLK-010) -----
+
+    // CEP:WHAT: Verifies that use after move is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn move_use_after_move_rejected() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let q: P = p; return eat(p); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that second by-value argument is a move error behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn move_second_by_value_argument_rejected() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let a: i32 = eat(p); let b: i32 = eat(p); return a + b; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"));
+    }
+
+    // CEP:WHAT: Verifies that copy scalars can be reused freely behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn copy_scalars_are_immune_to_moves() {
+        lower_ok("fn main() -> i32 { let x: i32 = 1; let y: i32 = x; return x + y; }");
+    }
+
+    // CEP:WHAT: Verifies that reassignment reinitializes a moved value behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn reassignment_reinitializes_moved_value() {
+        lower_ok(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn make() -> P { return P { x: 7 }; } \
+             fn main() -> i32 { let mut p: P = make(); let a: i32 = eat(p); p = make(); return a + eat(p); }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that partial move blocks whole use allows other fields behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn partial_move_blocks_whole_use_allows_other_fields() {
+        // Reading a different field after a partial move is fine.
+        lower_ok(
+            "struct Inner { v: i32 } \
+             struct P { a: Inner, b: i32 } \
+             fn main() -> i32 { let p: P = P { a: Inner { v: 5 }, b: 7 }; let t: Inner = p.a; return p.b + t.v; }",
+        );
+        // Using the whole struct after a partial move is rejected.
+        let diags = lower_err(
+            "struct Inner { v: i32 } \
+             struct P { a: Inner, b: i32 } \
+             fn eat(p: P) -> i32 { return p.b; } \
+             fn main() -> i32 { let p: P = P { a: Inner { v: 5 }, b: 7 }; let t: Inner = p.a; return eat(p); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+        // Moving the same field twice is rejected.
+        let diags = lower_err(
+            "struct Inner { v: i32 } \
+             struct P { a: Inner, b: i32 } \
+             fn eat(i: Inner) -> i32 { return i.v; } \
+             fn main() -> i32 { let p: P = P { a: Inner { v: 5 }, b: 7 }; let t: Inner = p.a; let u: Inner = p.a; return eat(t) + eat(u); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"));
+    }
+
+    // CEP:WHAT: Verifies that field reassignment restores a partial move behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn field_reassignment_restores_partial_move() {
+        lower_ok(
+            "struct Inner { v: i32 } \
+             struct P { a: Inner, b: i32 } \
+             fn eat(i: Inner) -> i32 { return i.v; } \
+             fn make() -> Inner { return Inner { v: 9 }; } \
+             fn main() -> i32 { let mut p: P = P { a: Inner { v: 5 }, b: 7 }; let t: Inner = p.a; p.a = make(); return eat(p.a) + p.b + t.v; }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that move while borrowed is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn move_conflicts_with_active_borrow() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let r: &P = &p; return eat(p); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0006"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that moving out of a reference is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn cannot_move_out_of_reference() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let r: &P = &p; let q: P = *r; return q.x; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0025"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that moving out of an array element is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn cannot_move_out_of_array_element() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn main() -> i32 { let a: [P; 2] = [P { x: 1 }, P { x: 2 }]; let q: P = a[0]; return q.x; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0025"), "{:#?}", diags);
+        // Copy elements stay freely readable.
+        lower_ok(
+            "fn main() -> i32 { let a: [i32; 2] = [1, 2]; let q: i32 = a[0]; return q + a[1]; }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that match moves the scrutinee and payload binding owns behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn match_moves_scrutinee_and_payload_binding_owns() {
+        // The scrutinee is consumed by the match.
+        let diags = lower_err(
+            "enum W { S(i32), N } \
+             fn main() -> i32 { let w: W = W::S(9); match w { W::S(v) => { return v; }, _ => {} } return w == w as i32; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+        // Aggregate payloads bind by value and are owned by the arm.
+        lower_ok(
+            "struct P { x: i32 } \
+             enum W { S(P), N } \
+             fn main() -> i32 { let p: P = P { x: 3 }; let w: W = W::S(p); match w { W::S(v) => { return v.x; }, _ => {} } return 0; }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that struct literal fields move behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn struct_literal_fields_move() {
+        let diags = lower_err(
+            "struct Inner { v: i32 } \
+             struct P { a: Inner } \
+             fn eat(i: Inner) -> i32 { return i.v; } \
+             fn main() -> i32 { let i: Inner = Inner { v: 1 }; let p: P = P { a: i }; return eat(i); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that by value receiver moves the receiver behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn by_value_receiver_moves() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             impl P { fn eat(self) -> i32 { return self.x; } } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let a: i32 = p.eat(); return a + p.eat(); }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+        // Reference receivers only borrow.
+        lower_ok(
+            "struct P { x: i32 } \
+             impl P { fn get(&self) -> i32 { return self.x; } } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let a: i32 = p.get(); return a + p.get(); }",
+        );
+    }
+
+    // ----- ownership: deferred initialization (ticket PLK-010) -----
+
+    // CEP:WHAT: Verifies that deferred let requires annotation behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_requires_annotation() {
+        let diags = lower_err("fn main() -> i32 { let x; x = 1; return x; }");
+        assert!(diags.iter().any(|d| d.code == "PLK-S0020"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that deferred let definite assignment works behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_definite_assignment_accepted() {
+        let program = lower_ok(
+            "fn main() -> i32 { \
+                 let x: i32; \
+                 let c: i32 = 1; \
+                 if c > 0 { x = 10; } else { x = 20; } \
+                 return x; \
+             }",
+        );
+        assert_eq!(program.funcs.len(), 1);
+    }
+
+    // CEP:WHAT: Verifies that deferred let read before init rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_read_before_init_rejected() {
+        let diags = lower_err("fn main() -> i32 { let x: i32; return x; }");
+        assert!(diags.iter().any(|d| d.code == "PLK-S0024"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that deferred let needs every branch to assign behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_requires_all_branches_to_assign() {
+        let diags = lower_err(
+            "fn main() -> i32 { let x: i32; let c: i32 = 1; if c > 0 { x = 10; } return x; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0024"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that diverging branches exempt assignment behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_diverging_branch_exempt() {
+        lower_ok(
+            "fn main() -> i32 { \
+                 let x: i32; \
+                 let c: i32 = 0; \
+                 if c > 0 { return 1; } \
+                 x = 5; \
+                 return x; \
+             }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that borrow before init is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_borrow_before_init_rejected() {
+        let diags =
+            lower_err("fn main() -> i32 { let x: i32; let r: &i32 = &x; x = 5; return *r; }");
+        assert!(diags.iter().any(|d| d.code == "PLK-S0024"), "{:#?}", diags);
+    }
+
+    // CEP:WHAT: Verifies that first assignment without mut works once behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_first_assignment_is_initialization() {
+        lower_ok("fn main() -> i32 { let x: i32; x = 5; return x; }");
+        // The second assignment mutates and therefore requires `mut`.
+        let diags = lower_err("fn main() -> i32 { let x: i32; x = 5; x = 6; return x; }");
+        assert!(diags.iter().any(|d| d.code == "PLK-S0005"), "{:#?}", diags);
+        // With `mut` both assignments are fine.
+        lower_ok("fn main() -> i32 { let mut x: i32; x = 5; x = 6; return x; }");
+    }
+
+    // CEP:WHAT: Verifies that moving a value inside a loop is rejected behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn loop_move_rejected() {
+        let diags = lower_err(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn main() -> i32 { let p: P = P { x: 4 }; while p.x > 0 { return eat(p); } return 0; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0023"), "{:#?}", diags);
+        // Reassignment inside the loop is the supported pattern.
+        lower_ok(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn make() -> P { return P { x: 4 }; } \
+             fn main() -> i32 { let mut p: P = make(); let mut n: i32 = 0; while n < 2 { let a: i32 = eat(p); p = make(); n = n + a; } return n; }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that deferred init is conservative across loops behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn deferred_let_in_loop_is_conservative() {
+        // A loop body may run zero times: assignment inside does not count.
+        let diags = lower_err(
+            "fn main() -> i32 { let x: i32; let c: i32 = 0; while c > 0 { x = 1; } return x; }",
+        );
+        assert!(diags.iter().any(|d| d.code == "PLK-S0024"), "{:#?}", diags);
+        // Assigning before the loop makes it definite.
+        lower_ok(
+            "fn main() -> i32 { let mut x: i32; let c: i32 = 0; x = 0; while c > 0 { x = 1; } return x; }",
+        );
+    }
+
+    // CEP:WHAT: Verifies that statements after a terminator are skipped behaves as specified.
+    // CEP:WHY: Regression pin: a failure means the behavior under test changed without a specification change.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: The test fails on unexpected output or exit status.
+    // CEP:ASSUMES: Fixture inputs are repository-controlled.
+    // CEP:COST: Microseconds; unit test.
+    // CEP:EVIDENCE: cargo test.
+    #[test]
+    fn statements_after_terminator_are_not_analyzed() {
+        // The dead statement would otherwise be a use-after-move error.
+        lower_ok(
+            "struct P { x: i32 } \
+             fn eat(p: P) -> i32 { return p.x; } \
+             fn main() -> i32 { let p: P = P { x: 1 }; let a: i32 = eat(p); return a; eat(p); }",
+        );
+    }
 }

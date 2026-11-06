@@ -15,7 +15,7 @@ Every non-complete implementation item in this repository carries exactly one ti
 | PLK-007 | Generics and monomorphization | stub | Design 2.10 generics. |
 | PLK-008 | Bounded comptime execution | stub | Design 2.10 comptime interpreter with resource limits. |
 | PLK-009 | `Result`, `Option`, and the prefix `try` keyword | stub | Design 2.11 error handling. |
-| PLK-010 | Heap types, ownership move checking, allocators | stub | Engages the existing move/borrow machinery with non-Copy types; lets without initializers. |
+| PLK-010 | Heap types, ownership move checking, allocators | partial | Move checking (use-after-move, partial moves, moves out of references/elements, move-while-borrowed, loop conservatism), `Copy` classification, and deferred initialization with definite assignment are complete. Remaining: heap types, explicit allocators, and drop elaboration. |
 | PLK-011 | Memory IR: alias analysis, PEA, SROA (design Stage 3) | stub | Deep alias analysis over abstract locations. |
 | PLK-012 | Machine IR: DP instruction selection, iterated register coalescing, scheduling (design Stage 6, passes 139-158) | stub | Replaces the frame-resident model. |
 | PLK-013 | Remaining local/global optimization passes (catalog 1-80 minus implemented) | stub | Row-by-row enablement with golden tests per pass. |
