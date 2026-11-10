@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::alloc::{self, Reg, RegAlloc};
 use crate::frame::{self, Frame};
 use planck_ir::{BinOp, Callee, Const, Inst, Intrinsic, IrFunc, Program, Term, TrapKind, Ty, UnOp};
 use std::collections::BTreeMap;
@@ -142,6 +143,8 @@ struct FuncEmitter<'a> {
     func: &'a IrFunc,
     fn_index: usize,
     frame: Frame,
+    /// Stage-1 register assignment: hot vregs cached in dedicated registers.
+    alloc: RegAlloc,
     /// Vreg currently resident in %rax for load elision.
     forwarded: Option<u32>,
     /// Number of division sites emitted so far in this function; distinguishes
@@ -163,6 +166,7 @@ impl<'a> FuncEmitter<'a> {
             func,
             fn_index,
             frame: frame::compute(func),
+            alloc: alloc::compute(func),
             forwarded: None,
             div_sites: 0,
             float_pool,
@@ -206,6 +210,37 @@ impl<'a> FuncEmitter<'a> {
         self.forwarded = None;
     }
 
+    /// The cache register of a vreg, if the allocator selected one.
+    // CEP:WHAT: Handles the cache register query step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn cache_reg(&self, vreg: u32) -> Option<Reg> {
+        self.alloc.cache_reg(vreg)
+    }
+
+    /// Tests a Bool vreg against 1. Cached bools test their register byte in
+    /// place (rax forwarding is neither needed nor disturbed); the memory path
+    /// loads into %rax first.
+    // CEP:WHAT: Handles the test bool step of this stage per the design and the file header contract.
+    // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+    // CEP:STATUS: complete
+    // CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+    // CEP:ASSUMES: See the file header for the stage-wide assumptions.
+    // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+    // CEP:EVIDENCE: cargo test over the containing crate.
+    fn test_bool(&mut self, vreg: u32) {
+        if let Some(r) = self.cache_reg(vreg) {
+            self.w(&format!("    testb $1, {}", r.byte));
+            return;
+        }
+        self.load_vreg(vreg, &Ty::Bool);
+        self.w("    testb $1, %al");
+    }
+
     /// Loads a value into %rax, reusing the forwarded copy when possible.
     // CEP:WHAT: Handles the load vreg step of this stage per the design and the file header contract.
     // CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
@@ -216,6 +251,20 @@ impl<'a> FuncEmitter<'a> {
     // CEP:EVIDENCE: cargo test over the containing crate.
     fn load_vreg(&mut self, vreg: u32, ty: &Ty) {
         if self.forwarded == Some(vreg) {
+            return;
+        }
+        if let Some(r) = self.cache_reg(vreg) {
+            // Cached: a register-to-register move replaces the memory load.
+            // The register always holds the canonical widened value because
+            // every definition re-widens rax before copying it there.
+            let insn = if r.is_float {
+                let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
+                format!("mov{} {}, %xmm0", suffix, r.full)
+            } else {
+                format!("movq {}, %rax", r.full)
+            };
+            self.w(&format!("    {}", insn));
+            self.forwarded = Some(vreg);
             return;
         }
         let mem = self.vreg_mem(vreg);
@@ -234,6 +283,28 @@ impl<'a> FuncEmitter<'a> {
     // CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
     // CEP:EVIDENCE: cargo test over the containing crate.
     fn store_vreg(&mut self, vreg: u32, ty: &Ty) {
+        if let Some(r) = self.cache_reg(vreg) {
+            // Cached: re-widen rax FIRST (so the register copy is canonical),
+            // then copy instead of storing to the slot. The frame slot for
+            // this vreg stays unused; every use reads the register.
+            match ty {
+                Ty::I8 => self.w("    movsbq %al, %rax"),
+                Ty::U8 | Ty::Bool => self.w("    movzbq %al, %rax"),
+                Ty::I16 => self.w("    movswq %ax, %rax"),
+                Ty::U16 => self.w("    movzwq %ax, %rax"),
+                Ty::I32 => self.w("    movslq %eax, %rax"),
+                Ty::U32 | Ty::Char => self.w("    movl %eax, %eax"),
+                _ => {}
+            }
+            if r.is_float {
+                let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
+                self.w(&format!("    mov{} %xmm0, {}", suffix, r.full));
+            } else {
+                self.w(&format!("    movq %rax, {}", r.full));
+            }
+            self.forwarded = Some(vreg);
+            return;
+        }
         let mem = self.vreg_mem(vreg);
         self.w(&format!("    {}", store_insn(ty, &mem)));
         match ty {
@@ -312,7 +383,17 @@ fn emit_func(
     // Prologue.
     em.w("    pushq %rbp");
     em.w("    movq %rsp, %rbp");
-    em.w(&format!("    subq ${}, %rsp", em.frame.frame_size));
+    // Callee-saved cache registers sit below the frame: an odd count would
+    // leave %rsp misaligned for calls, so pad the frame by one slot then.
+    let saved_ints: Vec<usize> = em.alloc.saved_int().to_vec();
+    let save_pad: u32 = if saved_ints.len() % 2 == 1 { 8 } else { 0 };
+    em.w(&format!(
+        "    subq ${}, %rsp",
+        em.frame.frame_size + save_pad
+    ));
+    for idx in &saved_ints {
+        em.w(&format!("    pushq {}", alloc::INT_CACHE_REGS[*idx]));
+    }
     // Save the hidden sret pointer before anything can clobber rdi.
     if let (Some(_), Some(save_off)) = (func.sret_slot, em.frame.sret_save_offset) {
         em.w(&format!("    movq %rdi, -{}(%rbp)", save_off));
@@ -353,8 +434,7 @@ fn emit_func(
                 then_blk,
                 else_blk,
             } => {
-                em.load_vreg(cond.0, &Ty::Bool);
-                em.w("    testb $1, %al");
+                em.test_bool(cond.0);
                 em.w(&format!("    jne {}", em.block_label(then_blk.0)));
                 em.w(&format!("    jmp {}", em.block_label(else_blk.0)));
             }
@@ -563,13 +643,17 @@ fn emit_return(em: &mut FuncEmitter, value: Option<&planck_ir::Vreg>) {
         Ty::Unit => {}
         Ty::F32 | Ty::F64 => {
             if let Some(vreg) = value {
-                let mem = em.vreg_mem(vreg.0);
                 let suffix = if matches!(em.func.ret, Ty::F32) {
                     "ss"
                 } else {
                     "sd"
                 };
-                em.w(&format!("    mov{} {}, %xmm0", suffix, mem));
+                if let Some(r) = em.cache_reg(vreg.0) {
+                    em.w(&format!("    mov{} {}, %xmm0", suffix, r.full));
+                } else {
+                    let mem = em.vreg_mem(vreg.0);
+                    em.w(&format!("    mov{} {}, %xmm0", suffix, mem));
+                }
             }
         }
         ret if ret.scalar_size().is_some() => {
@@ -592,6 +676,13 @@ fn emit_return(em: &mut FuncEmitter, value: Option<&planck_ir::Vreg>) {
                 em.w(&format!("    movq -{}(%rbp), %rax", save_off));
             }
         }
+    }
+    // Pop the callee-saved cache registers (reverse push order), then the
+    // frame pointer. `leave` also resets %rsp, but the pops need %rsp at the
+    // save area first.
+    let saved_ints: Vec<usize> = em.alloc.saved_int().to_vec();
+    for idx in saved_ints.iter().rev() {
+        em.w(&format!("    popq {}", alloc::INT_CACHE_REGS[*idx]));
     }
     em.w("    leave");
     em.w("    ret");
@@ -746,8 +837,7 @@ fn emit_inst(em: &mut FuncEmitter, inst: &Inst) {
             emit_call(em, *dst, *sret, *callee, args, ret);
         }
         Inst::TrapIf { cond, trap } => {
-            em.load_vreg(cond.0, &Ty::Bool);
-            em.w("    testb $1, %al");
+            em.test_bool(cond.0);
             em.w(&format!("    jne {}_{}", trap_label(*trap), em.fn_index));
         }
         Inst::Trap { trap } => {
@@ -890,17 +980,48 @@ fn emit_bin(
         emit_cmp(em, op, dst, a, b, ty);
         return;
     }
-    // Integer operations: a lands in %rax (widened), b in %rcx (widened); narrow
-    // operation suffixes act on the low bits, which is exactly the truncation semantics.
-    em.load_vreg(a.0, ty);
-    em.w("    movq %rax, %r10");
-    em.load_vreg(b.0, ty);
-    em.w("    movq %rax, %rcx");
-    em.w("    movq %r10, %rax");
+    match op {
+        BinOp::Mul => {
+            emit_mul(em, dst, a, b, ty, checked);
+            return;
+        }
+        BinOp::Div | BinOp::Rem => {
+            emit_div(em, op, dst, a, b, ty, checked);
+            return;
+        }
+        BinOp::Shl | BinOp::Shr => {
+            emit_shift(em, op, dst, a, b, ty);
+            return;
+        }
+        _ => {}
+    }
+    // Add/Sub/BitAnd/BitOr/BitXor: the result must land in %rax for the
+    // narrow suffix forms. Operand placement adapts to the cache assignment:
+    //   b cached: put a in %rax and use the cache register as the source.
+    //   a cached, b memory: load b through %rax first, then restore a.
+    //   neither cached: park a in %r10 while b loads (the classic dance).
     let (creg, areg) = narrow_regs(suffix);
+    let creg_owned: String = if let Some(r) = em.cache_reg(b.0) {
+        subreg(r, suffix).to_string()
+    } else {
+        creg.to_string()
+    };
+    if em.cache_reg(b.0).is_some() {
+        em.load_vreg(a.0, ty);
+    } else if em.cache_reg(a.0).is_some() {
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+        em.load_vreg(a.0, ty);
+    } else {
+        em.load_vreg(a.0, ty);
+        em.w("    movq %rax, %r10");
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+        em.w("    movq %r10, %rax");
+    }
     match op {
         BinOp::Add => {
-            em.w(&format!("    add{} {}, {}", suffix, creg, areg));
+            em.w(&format!("    add{} {}, {}", suffix, creg_owned, areg));
             if checked {
                 let flag = if ty.is_signed() { "jo" } else { "jc" };
                 em.w(&format!(
@@ -912,7 +1033,7 @@ fn emit_bin(
             }
         }
         BinOp::Sub => {
-            em.w(&format!("    sub{} {}, {}", suffix, creg, areg));
+            em.w(&format!("    sub{} {}, {}", suffix, creg_owned, areg));
             if checked {
                 let flag = if ty.is_signed() { "jo" } else { "jc" };
                 em.w(&format!(
@@ -923,24 +1044,14 @@ fn emit_bin(
                 ));
             }
         }
-        BinOp::Mul => {
-            emit_mul(em, dst, a, ty, checked);
-            return;
-        }
-        BinOp::Div | BinOp::Rem => {
-            emit_div(em, op, dst, a, ty, checked);
-            return;
-        }
-        BinOp::BitAnd => em.w(&format!("    and{} {}, {}", suffix, creg, areg)),
-        BinOp::BitOr => em.w(&format!("    or{} {}, {}", suffix, creg, areg)),
-        BinOp::BitXor => em.w(&format!("    xor{} {}, {}", suffix, creg, areg)),
-        BinOp::Shl => em.w(&format!("    shl{} {}, {}", suffix, creg, areg)),
-        BinOp::Shr => {
-            let insn = if ty.is_signed() { "sar" } else { "shr" };
-            em.w(&format!("    {}{} {}, {}", insn, suffix, creg, areg));
-        }
+        BinOp::BitAnd => em.w(&format!("    and{} {}, {}", suffix, creg_owned, areg)),
+        BinOp::BitOr => em.w(&format!("    or{} {}, {}", suffix, creg_owned, areg)),
+        BinOp::BitXor => em.w(&format!("    xor{} {}, {}", suffix, creg_owned, areg)),
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
             unreachable!("handled by emit_cmp")
+        }
+        BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr => {
+            unreachable!("handled above")
         }
     }
     // The result sits in the low bits of rax; widen per type before storing.
@@ -962,6 +1073,73 @@ fn narrow_regs(suffix: &str) -> (&'static str, &'static str) {
         "l" => ("%ecx", "%eax"),
         _ => ("%rcx", "%rax"),
     }
+}
+
+/// The sub-register of a cache register matching an instruction suffix, so
+/// narrow operations can address a cached value's low bits directly.
+// CEP:WHAT: Handles the subregister selection step of this stage per the design and the file header contract.
+// CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+// CEP:ASSUMES: See the file header for the stage-wide assumptions.
+// CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+// CEP:EVIDENCE: cargo test over the containing crate.
+fn subreg(r: Reg, suffix: &str) -> &'static str {
+    if r.is_float {
+        return r.full;
+    }
+    match suffix {
+        "b" => r.byte,
+        "w" => r.word,
+        "l" => r.dword,
+        _ => r.full,
+    }
+}
+
+/// Emits a shift: the count must reach %cl (a hardware constraint), the value
+/// lands in %rax. Self-contained: widens and stores the result.
+// CEP:WHAT: Handles the emit shift step of this stage per the design and the file header contract.
+// CEP:WHY: The stage's contract requires this step; the module documentation records the design choice and rejected alternatives.
+// CEP:STATUS: complete
+// CEP:FAILURE: Returns diagnostics or results; never panics on any input.
+// CEP:ASSUMES: See the file header for the stage-wide assumptions.
+// CEP:COST: Bounded by the input size of this stage; no allocation beyond the documented model.
+// CEP:EVIDENCE: cargo test over the containing crate.
+fn emit_shift(
+    em: &mut FuncEmitter,
+    op: BinOp,
+    dst: planck_ir::Vreg,
+    a: planck_ir::Vreg,
+    b: planck_ir::Vreg,
+    ty: &Ty,
+) {
+    let suffix = int_suffix(width_of(ty));
+    if let Some(r) = em.cache_reg(b.0) {
+        em.w(&format!("    movq {}, %rcx", r.full));
+    } else {
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+    }
+    em.load_vreg(a.0, ty);
+    let insn = if op == BinOp::Shl {
+        "shl"
+    } else if ty.is_signed() {
+        "sar"
+    } else {
+        "shr"
+    };
+    // The count register must be %rcx-family and the value %rax-family at the
+    // instruction's width; the hardware masks the count to the shift width.
+    let (creg, areg) = narrow_regs(suffix);
+    em.w(&format!("    {}{} {}, {}", insn, suffix, creg, areg));
+    match ty {
+        Ty::I8 => em.w("    movsbq %al, %rax"),
+        Ty::U8 | Ty::Bool => em.w("    movzbq %al, %rax"),
+        Ty::I16 => em.w("    movswq %ax, %rax"),
+        Ty::U16 => em.w("    movzwq %ax, %rax"),
+        _ => {}
+    }
+    em.store_vreg(dst.0, ty);
 }
 
 /// Loads `a` back into %rax before an operation that clobbers it (used by div/mul paths).
@@ -988,14 +1166,22 @@ fn emit_mul(
     em: &mut FuncEmitter,
     dst: planck_ir::Vreg,
     a: planck_ir::Vreg,
+    b: planck_ir::Vreg,
     ty: &Ty,
     checked: bool,
 ) {
     let width = width_of(ty);
+    // Operand placement: b must reach %rcx (the imul source), then a reloads
+    // into %rax (the imul destination). Placing b first keeps a's load last.
+    if let Some(r) = em.cache_reg(b.0) {
+        em.w(&format!("    movq {}, %rcx", r.full));
+    } else {
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+    }
+    reload_operand(em, a, ty);
     match width {
         8 => {
-            reload_operand(em, a, ty);
-            // b is in %rcx from the caller.
             em.w("    imulq %rcx, %rax");
             if checked {
                 let flag = if ty.is_signed() { "jo" } else { "jc" };
@@ -1008,7 +1194,6 @@ fn emit_mul(
             }
         }
         4 => {
-            reload_operand(em, a, ty);
             em.w("    imull %ecx, %eax");
             if checked {
                 let flag = if ty.is_signed() { "jo" } else { "jc" };
@@ -1028,7 +1213,7 @@ fn emit_mul(
         // 1- and 2-byte multiplies: the 32-bit product of two narrow values is exact,
         // so checked overflow is a range compare; unchecked wraps by narrow store.
         _ => {
-            reload_operand(em, a, ty);
+            // a is already in %rax and b in %rcx from the placement above.
             // Sign/zero-extend a into 32 bits.
             if ty.is_signed() {
                 em.w("    movswl %ax, %eax");
@@ -1080,6 +1265,7 @@ fn emit_div(
     op: BinOp,
     dst: planck_ir::Vreg,
     a: planck_ir::Vreg,
+    b: planck_ir::Vreg,
     ty: &Ty,
     _checked: bool,
 ) {
@@ -1087,7 +1273,21 @@ fn emit_div(
     let _ = suffix_label(width);
     let div_site = em.div_sites;
     em.div_sites += 1;
-    // At this point %rcx holds b (widened) and %r10 holds a (widened) from the caller.
+    // Operand placement: %rcx holds b (the divisor) and %r10 holds a (the
+    // MinInt/-1 guard operand). Cached operands move register-to-register;
+    // memory operands pass through %rax on the way.
+    if let Some(r) = em.cache_reg(b.0) {
+        em.w(&format!("    movq {}, %rcx", r.full));
+    } else {
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+    }
+    if let Some(r) = em.cache_reg(a.0) {
+        em.w(&format!("    movq {}, %r10", r.full));
+    } else {
+        em.load_vreg(a.0, ty);
+        em.w("    movq %rax, %r10");
+    }
     if ty.is_signed() {
         // Guard the MinInt / -1 hardware fault with an explicit overflow trap.
         em.w("    cmpq $-1, %rcx");
@@ -1185,13 +1385,28 @@ fn emit_cmp(
         return;
     }
     let suffix = int_suffix(width_of(ty));
-    em.load_vreg(a.0, ty);
-    em.w("    movq %rax, %r10");
-    em.load_vreg(b.0, ty);
-    em.w("    movq %rax, %rcx");
-    em.w("    movq %r10, %rax");
+    // Same cache-aware placement as the ALU path: %rax must hold a when the
+    // compare fires so the setcc selects on `a OP b`.
     let (creg, areg) = narrow_regs(suffix);
-    em.w(&format!("    cmp{} {}, {}", suffix, creg, areg));
+    let creg_owned: String = if let Some(r) = em.cache_reg(b.0) {
+        subreg(r, suffix).to_string()
+    } else {
+        creg.to_string()
+    };
+    if em.cache_reg(b.0).is_some() {
+        em.load_vreg(a.0, ty);
+    } else if em.cache_reg(a.0).is_some() {
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+        em.load_vreg(a.0, ty);
+    } else {
+        em.load_vreg(a.0, ty);
+        em.w("    movq %rax, %r10");
+        em.load_vreg(b.0, ty);
+        em.w("    movq %rax, %rcx");
+        em.w("    movq %r10, %rax");
+    }
+    em.w(&format!("    cmp{} {}, {}", suffix, creg_owned, areg));
     let set = match (op, ty.is_signed()) {
         (BinOp::Eq, _) => "sete",
         (BinOp::Ne, _) => "setne",
@@ -1226,12 +1441,6 @@ fn emit_float_bin(
     ty: &Ty,
 ) {
     let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
-    let b_reg = "%xmm1";
-    em.load_vreg(a.0, ty);
-    em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
-    em.load_vreg(b.0, ty);
-    em.w(&format!("    mov{} %xmm0, {}", suffix, b_reg));
-    em.w(&format!("    mov{} %xmm2, %xmm0", suffix));
     let insn = match op {
         BinOp::Add => format!("add{}", suffix),
         BinOp::Sub => format!("sub{}", suffix),
@@ -1243,7 +1452,19 @@ fn emit_float_bin(
             return;
         }
     };
-    em.w(&format!("    {} {}, %xmm0", insn, b_reg));
+    if let Some(rb) = em.cache_reg(b.0) {
+        // b cached: a into %xmm0, then the operation reads the register.
+        em.load_vreg(a.0, ty);
+        em.w(&format!("    {} {}, %xmm0", insn, rb.full));
+        em.store_vreg(dst.0, ty);
+        return;
+    }
+    em.load_vreg(a.0, ty);
+    em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
+    em.load_vreg(b.0, ty);
+    em.w(&format!("    mov{} %xmm0, %xmm1", suffix));
+    em.w(&format!("    mov{} %xmm2, %xmm0", suffix));
+    em.w(&format!("    {} {}, %xmm0", insn, "%xmm1"));
     em.store_vreg(dst.0, ty);
 }
 
@@ -1263,13 +1484,22 @@ fn emit_float_cmp(
     ty: &Ty,
 ) {
     let suffix = if matches!(ty, Ty::F32) { "ss" } else { "sd" };
-    em.load_vreg(a.0, ty);
-    em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
-    em.load_vreg(b.0, ty);
-    // Operand order: a lands in %xmm2, b in %xmm0. AT&T `ucomis src, dst`
-    // maps to Intel UCOMISD dst, src, so `ucomis %xmm0, %xmm2` compares
-    // %xmm2 (a) against %xmm0 (b) and the flags reflect `a OP b`.
-    em.w(&format!("    ucomi{} %xmm0, %xmm2", suffix));
+    // Operand order: a lands in %xmm2, b stays in %xmm0 (or its cache
+    // register). AT&T `ucomis src, dst` maps to Intel UCOMISD dst, src, so
+    // the flags reflect `a OP b`.
+    match em.cache_reg(b.0) {
+        Some(rb) => {
+            em.load_vreg(a.0, ty);
+            em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
+            em.w(&format!("    ucomi{} {}, %xmm2", suffix, rb.full));
+        }
+        None => {
+            em.load_vreg(a.0, ty);
+            em.w(&format!("    mov{} %xmm0, %xmm2", suffix));
+            em.load_vreg(b.0, ty);
+            em.w(&format!("    ucomi{} %xmm0, %xmm2", suffix));
+        }
+    }
     // Flags: setcc below selects on `a OP b` directly.
     let set = match op {
         BinOp::Eq => "sete",
@@ -1474,18 +1704,30 @@ fn emit_call(
             em.w("    ; unsupported: float stack argument dropped (PLK-026)");
         }
     }
-    // Integer args + hidden sret.
+    // Integer args + hidden sret. Cached operands move directly from their
+    // register into the ABI register (rax forwarding stays untouched; the
+    // call invalidates it right after).
     if let Some(sret_vreg) = sret {
-        em.load_vreg(sret_vreg.0, &Ty::U64);
-        em.w("    movq %rax, %rdi");
+        if let Some(r) = em.cache_reg(sret_vreg.0) {
+            em.w(&format!("    movq {}, %rdi", r.full));
+        } else {
+            em.load_vreg(sret_vreg.0, &Ty::U64);
+            em.w("    movq %rax, %rdi");
+        }
     }
     for (idx, (vreg, ty)) in int_args.iter().enumerate() {
         let reg_slot = idx + usize::from(hidden_sret);
         if reg_slot < int_regs.len() {
-            // load_insn widens every type to 64 bits using the SOURCE width, so narrow
-            // slot reads never pull in neighboring bytes.
-            em.load_vreg(*vreg, ty);
-            em.w(&format!("    movq %rax, {}", int_regs[reg_slot]));
+            if let Some(r) = em.cache_reg(*vreg) {
+                // The register holds the canonical widened value, so a direct
+                // move matches the widened load+move pair exactly.
+                em.w(&format!("    movq {}, {}", r.full, int_regs[reg_slot]));
+            } else {
+                // load_insn widens every type to 64 bits using the SOURCE width, so narrow
+                // slot reads never pull in neighboring bytes.
+                em.load_vreg(*vreg, ty);
+                em.w(&format!("    movq %rax, {}", int_regs[reg_slot]));
+            }
         }
     }
     // Symbol.

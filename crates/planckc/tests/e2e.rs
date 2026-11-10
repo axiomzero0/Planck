@@ -558,3 +558,34 @@ fn nested_loops_with_float_carry() {
     // escape steps: (2 + 3 + 4 + 5) * 5 = 70.
     assert_eq!(outcome.stdout, "70\n");
 }
+
+// CEP:WHAT: Verifies that 64-bit and 32-bit shifts at every width compute correct values inside loops with cached operands.
+// CEP:WHY: Regression pin: the shift lowering must use the width-matching count/value register pair; a q-suffix instruction with a byte register is rejected by the assembler, and a wrong count register silently corrupts results.
+// CEP:STATUS: complete
+// CEP:FAILURE: The test fails when compiled output does not assemble or shifts produce wrong values.
+// CEP:ASSUMES: Fixture inputs are repository-controlled.
+// CEP:COST: One driver invocation plus one link.
+// CEP:EVIDENCE: cargo test -p planckc --test e2e.
+#[test]
+fn shifts_compute_at_all_widths() {
+    let src = concat!(
+        "fn shl(x: i64, k: i64) -> i64 { return x << k; } ",
+        "fn shr(x: i64, k: i64) -> i64 { return x >> k; } ",
+        "fn main() -> i32 { ",
+        "let mut acc: i64 = 0; ",
+        "for i in 0..4 { ",
+        "acc = acc + shl(1, i as i64) * 1000000; ",
+        "acc = acc + shr(64, i as i64); ",
+        "let narrow: i32 = (i << 4) + (1024 >> i); ",
+        "acc = acc + narrow as i64; ",
+        "} ",
+        "print(acc); print('\\n'); ",
+        "return 0; }"
+    );
+    let outcome = run_program(src, "shifts_widths");
+    assert_eq!(outcome.exit, 0);
+    // i=0: 1e6 + 64 + 0 + 1024 = 1001088; i=1: 2e6 + 32 + 16 + 512 = 2000560;
+    // i=2: 4e6 + 16 + 32 + 256 = 4000304; i=3: 8e6 + 8 + 48 + 128 = 8000184.
+    // Total = 1001088 + 2000560 + 4000304 + 8000184 = 15002136.
+    assert_eq!(outcome.stdout, "15002136\n");
+}

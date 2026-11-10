@@ -49,7 +49,7 @@ This document maps every normative element of `design.md` (the Planck language a
 | Stage 3: Memory IR extraction (alias analysis, PEA, SROA) | stub | Aggregates are frame-resident; alias analysis is unnecessary at this shape | PLK-011 |
 | Stage 4: LLIR materialization | partial | The CFG IR is already materialized: leaders, terminators, dominators, natural loops; phi placement, LCSSA, and SSA destruction run in the optimizer (pipeline planck-opt-0.2.0) | PLK-003 |
 | Stage 5: Vector IR | stub | No vector types | PLK-017 |
-| Stage 6: Machine IR (DP selection, IRC regalloc) | partial | One-to-one selection with frame-resident values and rax forwarding; register allocation is implicit | PLK-012 |
+| Stage 6: Machine IR (DP selection, IRC regalloc) | partial | Stage-1 register caching landed: liveness + loop-depth selection into callee-saved rbx/r12-r15 and call-safe xmm8-12, frame-slot spill fallback; full Machine IR with DP selection and iterated coalescing remains | PLK-012 |
 | Stage 7: assembly/object emission | partial | AT&T assembly through the system assembler; ELF via the system linker; no direct object emission or DWARF | PLK-018 |
 
 ### Part 5: the 212 optimizations
