@@ -7,7 +7,7 @@ harness in `benches/`. Three questions are answered: how fast does `planckc`
 compile, how fast do Planck programs run compared to equivalent C compiled by
 gcc, and what does the checked-arithmetic safety net cost. The headline
 numbers on the reference machine: Planck compiles as fast as gcc (40-85 ms for
-these programs), generated code runs at **4.9x gcc -O2** (geometric mean,
+these programs), generated code runs at **5.0x gcc -O2** (geometric mean,
 down from 5.9x before the stage-1 register allocator landed),
 and the integer overflow checks cost **about 2% or less**. The dominant
 remaining gap is structural, not accidental: the full Machine IR with
@@ -62,24 +62,24 @@ configuration runs in roughly 15-220 ms.
 
 | Benchmark | gcc -O0 | gcc -O2 | planck (checked) | planck --release | checked vs C -O2 |
 |---|---|---|---|---|---|
-| fib | 68.0 ms | 14.1 ms | 70.5 ms | 70.2 ms | 5.0x |
-| primes | 11.6 ms | 11.1 ms | 12.8 ms | 12.6 ms | 1.2x |
-| sort | 43.5 ms | 13.3 ms | 83.5 ms | 83.7 ms | 6.3x |
-| mandelbrot | 11.1 ms | 6.2 ms | 30.3 ms | 30.4 ms | 4.9x |
-| nqueens | 20.4 ms | 11.7 ms | 22.8 ms | 23.0 ms | 2.0x |
-| matmul | 98.8 ms | 4.8 ms | 193.1 ms | 197.6 ms | 40.6x |
-| **geometric mean** | **3.20x** | **1.00x** | **4.92x** | **4.93x** | |
+| fib | 67.6 ms | 14.1 ms | 70.0 ms | 69.5 ms | 5.0x |
+| primes | 11.7 ms | 11.0 ms | 12.8 ms | 12.7 ms | 1.2x |
+| sort | 43.4 ms | 13.3 ms | 83.3 ms | 83.6 ms | 6.2x |
+| mandelbrot | 11.0 ms | 4.9 ms | 27.2 ms | 27.2 ms | 5.5x |
+| nqueens | 20.4 ms | 11.7 ms | 22.6 ms | 22.7 ms | 1.9x |
+| matmul | 98.7 ms | 4.8 ms | 192.7 ms | 197.6 ms | 39.8x |
+| **geometric mean** | **3.32x** | **1.00x** | **4.99x** | **5.00x** | |
 
 ### Compile time (median of 6, full toolchain)
 
 | Benchmark | gcc -O0 | gcc -O2 | planckc | planckc --release |
 |---|---|---|---|---|
-| fib | 28.9 ms | 52.0 ms | 40.4 ms | 41.4 ms |
-| primes | 29.0 ms | 37.3 ms | 40.6 ms | 40.6 ms |
-| sort | 30.7 ms | 51.7 ms | 51.4 ms | 51.0 ms |
-| mandelbrot | 28.7 ms | 36.6 ms | 44.8 ms | 43.0 ms |
-| nqueens | 31.6 ms | 36.2 ms | 41.1 ms | 42.1 ms |
-| matmul | 29.2 ms | 42.0 ms | 83.7 ms | 85.0 ms |
+| fib | 27.4 ms | 51.0 ms | 39.2 ms | 39.3 ms |
+| primes | 27.5 ms | 35.2 ms | 39.1 ms | 39.1 ms |
+| sort | 29.1 ms | 49.4 ms | 48.9 ms | 48.9 ms |
+| mandelbrot | 27.0 ms | 32.7 ms | 39.5 ms | 39.6 ms |
+| nqueens | 27.0 ms | 34.1 ms | 39.3 ms | 40.3 ms |
+| matmul | 28.6 ms | 40.6 ms | 79.6 ms | 80.2 ms |
 
 ### Binary .text size
 
@@ -95,8 +95,8 @@ configuration runs in roughly 15-220 ms.
 ## Analysis
 
 **The overflow checks are free.** The checked configuration is within run-to-run
-noise of `--release` everywhere (the largest deviation is 2.3% on matmul, and
-primes measures 1.8% *faster* checked; the sign flips both ways). The trap
+noise of `--release` everywhere (the largest deviation is 2.5% on matmul, and
+fib measures 0.7% *faster* checked; the sign flips both ways). The trap
 path is a compare-and-branch on each arithmetic node, perfectly predicted
 not-taken in these workloads. This is a meaningful claim for the language's
 safety story: design Part 3's checked-by-default arithmetic does not tax
@@ -110,19 +110,19 @@ integers, `xmm8`-`xmm12` for floats not live across calls. Liveness plus
 natural-loop depth weight the selection; every other value keeps its frame
 slot, so the spill path is the old emitter unchanged. Measured against the
 same suite on the same machine, the geometric mean improved from 5.90x to
-4.92x gcc -O2 (fib 1.12x, primes 1.13x, sort 1.15x, mandelbrot 1.37x,
+4.99x gcc -O2 (fib 1.12x, primes 1.12x, sort 1.16x, mandelbrot 1.38x,
 nqueens 1.38x, matmul 1.14x faster than before), and every .text section
 shrank -- register moves replaced load/store pairs. What is *not* won yet:
 the SSA-destruction copies at loop joins still round-trip through memory
 slots (coalescing, the rest of PLK-012), and array traffic still pays bounds
 checks plus no alias analysis (PLK-011).
 
-**Where Planck is already close.** primes (1.2x) and nqueens (2.0x) are
+**Where Planck is already close.** primes (1.2x) and nqueens (1.9x) are
 branchy and division/bit-heavy; there the residual frame traffic hurts least
 because the hardware divide and the unpredictable branches dominate, and gcc
 -O2 cannot remove the work either.
 
-**Where the value model still dominates.** sort (6.3x) and matmul (40.6x)
+**Where the value model still dominates.** sort (6.2x) and matmul (39.8x)
 are memory-heavy kernels: every array element access goes through explicit
 bounds checks and address arithmetic, and without alias analysis (PLK-011)
 the allocator cannot keep elements in registers across stores. gcc -O2 also

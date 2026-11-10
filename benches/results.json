@@ -1,6 +1,6 @@
 {
   "meta": {
-    "date": "2026-11-10T18:49:03+0000",
+    "date": "2026-11-10T18:57:13+0000",
     "cpu": "Intel(R) Xeon(R) Processor",
     "kernel": "5.10.134-013.15.kangaroo.al8.x86_64",
     "gcc": "cc (Debian 14.2.0-19) 14.2.0",
@@ -12,26 +12,26 @@
     "fib": {
       "configs": {
         "c_o0": {
-          "compile_ms": 28.9,
-          "run_ms": 67.96,
+          "compile_ms": 27.4,
+          "run_ms": 67.64,
           "text_bytes": 1438,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 52.0,
-          "run_ms": 14.1,
+          "compile_ms": 51.0,
+          "run_ms": 14.05,
           "text_bytes": 2508,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 40.4,
-          "run_ms": 70.46,
+          "compile_ms": 39.2,
+          "run_ms": 69.98,
           "text_bytes": 3455,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 41.4,
-          "run_ms": 70.22,
+          "compile_ms": 39.3,
+          "run_ms": 69.5,
           "text_bytes": 3435,
           "stdout_matches_reference": true
         }
@@ -41,26 +41,26 @@
     "primes": {
       "configs": {
         "c_o0": {
-          "compile_ms": 29.0,
-          "run_ms": 11.59,
+          "compile_ms": 27.5,
+          "run_ms": 11.68,
           "text_bytes": 1517,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 37.3,
-          "run_ms": 11.08,
+          "compile_ms": 35.2,
+          "run_ms": 10.97,
           "text_bytes": 1502,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 40.6,
-          "run_ms": 12.84,
+          "compile_ms": 39.1,
+          "run_ms": 12.81,
           "text_bytes": 3939,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 40.6,
-          "run_ms": 12.61,
+          "compile_ms": 39.1,
+          "run_ms": 12.65,
           "text_bytes": 3913,
           "stdout_matches_reference": true
         }
@@ -70,26 +70,26 @@
     "sort": {
       "configs": {
         "c_o0": {
-          "compile_ms": 30.7,
-          "run_ms": 43.5,
+          "compile_ms": 29.1,
+          "run_ms": 43.44,
           "text_bytes": 2296,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 51.7,
+          "compile_ms": 49.4,
           "run_ms": 13.34,
           "text_bytes": 2072,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 51.4,
-          "run_ms": 83.47,
+          "compile_ms": 48.9,
+          "run_ms": 83.34,
           "text_bytes": 28723,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 51.0,
-          "run_ms": 83.72,
+          "compile_ms": 48.9,
+          "run_ms": 83.58,
           "text_bytes": 28605,
           "stdout_matches_reference": true
         }
@@ -99,26 +99,26 @@
     "mandelbrot": {
       "configs": {
         "c_o0": {
-          "compile_ms": 28.7,
-          "run_ms": 11.1,
+          "compile_ms": 27.0,
+          "run_ms": 11.02,
           "text_bytes": 1682,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 36.6,
-          "run_ms": 6.16,
+          "compile_ms": 32.7,
+          "run_ms": 4.94,
           "text_bytes": 1574,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 44.8,
-          "run_ms": 30.33,
+          "compile_ms": 39.5,
+          "run_ms": 27.19,
           "text_bytes": 4309,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 43.0,
-          "run_ms": 30.4,
+          "compile_ms": 39.6,
+          "run_ms": 27.23,
           "text_bytes": 4291,
           "stdout_matches_reference": true
         }
@@ -128,26 +128,26 @@
     "nqueens": {
       "configs": {
         "c_o0": {
-          "compile_ms": 31.6,
-          "run_ms": 20.45,
+          "compile_ms": 27.0,
+          "run_ms": 20.43,
           "text_bytes": 1589,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 36.2,
+          "compile_ms": 34.1,
           "run_ms": 11.66,
           "text_bytes": 1596,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 41.1,
-          "run_ms": 22.77,
+          "compile_ms": 39.3,
+          "run_ms": 22.65,
           "text_bytes": 4017,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 42.1,
-          "run_ms": 22.99,
+          "compile_ms": 40.3,
+          "run_ms": 22.7,
           "text_bytes": 3979,
           "stdout_matches_reference": true
         }
@@ -157,26 +157,26 @@
     "matmul": {
       "configs": {
         "c_o0": {
-          "compile_ms": 29.2,
-          "run_ms": 98.79,
+          "compile_ms": 28.6,
+          "run_ms": 98.66,
           "text_bytes": 1951,
           "stdout_matches_reference": true
         },
         "c_o2": {
-          "compile_ms": 42.0,
-          "run_ms": 4.76,
+          "compile_ms": 40.6,
+          "run_ms": 4.84,
           "text_bytes": 1913,
           "stdout_matches_reference": true
         },
         "planck": {
-          "compile_ms": 83.7,
-          "run_ms": 193.12,
+          "compile_ms": 79.6,
+          "run_ms": 192.73,
           "text_bytes": 144566,
           "stdout_matches_reference": true
         },
         "planck_release": {
-          "compile_ms": 85.0,
-          "run_ms": 197.64,
+          "compile_ms": 80.2,
+          "run_ms": 197.62,
           "text_bytes": 144452,
           "stdout_matches_reference": true
         }

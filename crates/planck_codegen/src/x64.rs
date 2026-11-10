@@ -1128,10 +1128,12 @@ fn emit_shift(
     } else {
         "shr"
     };
-    // The count register must be %rcx-family and the value %rax-family at the
-    // instruction's width; the hardware masks the count to the shift width.
-    let (creg, areg) = narrow_regs(suffix);
-    em.w(&format!("    {}{} {}, {}", insn, suffix, creg, areg));
+    // Variable shifts count from %cl only -- the assembler-enforced hardware
+    // form at every width (a full %rcx count is rejected by stricter
+    // binutils); the value register matches the instruction width. The
+    // hardware masks the count to the shift width (ticket PLK-024).
+    let (_, areg) = narrow_regs(suffix);
+    em.w(&format!("    {}{} %cl, {}", insn, suffix, areg));
     match ty {
         Ty::I8 => em.w("    movsbq %al, %rax"),
         Ty::U8 | Ty::Bool => em.w("    movzbq %al, %rax"),

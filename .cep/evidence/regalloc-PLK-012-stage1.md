@@ -27,14 +27,14 @@ Same machine, same suite, before vs after (checked configuration, median of 7):
 
 | benchmark | before (ms) | after (ms) | speedup |
 |---|---|---|---|
-| fib | 78.2 | 70.5 | 1.11x |
+| fib | 78.2 | 70.0 | 1.12x |
 | primes | 14.3 | 12.8 | 1.12x |
-| sort | 96.5 | 83.5 | 1.16x |
-| mandelbrot | 37.5 | 30.3 | 1.24x |
-| nqueens | 31.2 | 22.8 | 1.37x |
-| matmul | 220.5 | 193.1 | 1.14x |
+| sort | 96.5 | 83.3 | 1.16x |
+| mandelbrot | 37.5 | 27.2 | 1.38x |
+| nqueens | 31.2 | 22.6 | 1.38x |
+| matmul | 220.5 | 192.7 | 1.14x |
 
-Geometric mean vs gcc -O2: 5.90x -> 4.92x (1.20x faster overall). Every
+Geometric mean vs gcc -O2: 5.90x -> 4.99x (1.18x faster overall). Every
 `.text` section shrank (register moves replaced load/store pairs). Full
 numbers: `doc/BENCHMARKS.md`, raw data `benches/results.json`.
 
